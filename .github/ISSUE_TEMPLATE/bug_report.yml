@@ -1,0 +1,35 @@
+name: Bug report
+description: 报告可复现的 Codex Remote 问题
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: Windows 版本、Node 版本、Codex 版本及脱敏后的登录状态。
+    validations: { required: true }
+  - type: textarea
+    id: reproduce
+    attributes: { label: 复现步骤 }
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: 预期行为 }
+    validations: { required: true }
+  - type: textarea
+    id: actual
+    attributes: { label: 实际行为 }
+    validations: { required: true }
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 只贴最小片段；不得上传 token、二维码、config.json 或凭据。
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: 安全确认
+      options:
+        - label: 我已移除 token、二维码、config.json、凭据、私人路径和敏感内容。
+          required: true

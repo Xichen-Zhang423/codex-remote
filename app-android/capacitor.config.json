@@ -1,0 +1,12 @@
+{
+  "appId": "com.codex.remote",
+  "appName": "Codex Remote",
+  "webDir": "../public",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

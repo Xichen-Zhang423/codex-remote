@@ -1,0 +1,3 @@
+/public/vendor/pdfjs/pdf.min.mjs -text
+/public/vendor/pdfjs/pdf.worker.min.mjs -text
+/public/vendor/pdfjs/LICENSE -text

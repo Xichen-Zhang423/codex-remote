@@ -1,0 +1,68 @@
+name: Build Codex Remote APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "public/**"
+      - "scripts/release-verify.js"
+      - "scripts/generate-brand-assets.mjs"
+      - "app-android/**"
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: codex-remote-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Verify release tree
+        run: npm run release:verify
+      - name: Install wrapper dependencies
+        working-directory: app-android
+        run: npm ci --no-audit --no-fund
+      - name: Generate Android project
+        working-directory: app-android
+        run: npx cap add android
+      - name: Bundle current web application
+        working-directory: app-android
+        run: npx cap sync android
+      - name: Add camera declaration and brand assets
+        working-directory: app-android
+        run: node scripts/patch-android.mjs
+      - name: Build debug APK
+        working-directory: app-android/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-remote-apk
+          path: app-android/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

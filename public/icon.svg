@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Codex Remote">
+  <rect width="512" height="512" rx="112" fill="#0b0d0c"/>
+  <path d="M88 94h336v324H88z" fill="#111512" stroke="#2a332b" stroke-width="12"/>
+  <path d="M88 94h336v74H88z" fill="#b7f34b"/>
+  <circle cx="126" cy="131" r="10" fill="#0b0d0c"/>
+  <path d="M166 131h210" stroke="#0b0d0c" stroke-width="14" stroke-linecap="square"/>
+  <path d="m160 238-44 44 44 44M207 336h83" fill="none" stroke="#f2f0e8" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter"/>
+  <path d="M328 220h68v68h-68z" fill="#ffbd59"/>
+  <path d="M348 240h28v28h-28z" fill="#0b0d0c"/>
+  <path d="M328 328h68v24h-68z" fill="#65d8d2"/>
+</svg>

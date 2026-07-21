@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b0d0c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'">
+  <title>Codex Remote · 本机中继控制台</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-16.png" sizes="16x16" type="image/png">
+  <link rel="icon" href="icons/icon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png" sizes="180x180">
+  <link rel="stylesheet" href="styles.css">
+  <script src="panel.js" defer></script>
+</head>
+<body class="panel-page">
+  <main class="panel-shell" aria-labelledby="panelTitle">
+    <p class="eyebrow">DESKTOP RELAY / CODEX REMOTE</p>
+    <h1 id="panelTitle">本机中继控制台</h1>
+    <p id="panelStatus" class="panel-lede" role="status" aria-live="polite">正在验证本机面板权限…</p>
+
+    <section class="panel-grid" id="panelControls" aria-label="服务状态" hidden>
+      <article><h2>服务</h2><p id="serviceStatus">—</p></article>
+      <article><h2>Codex</h2><p id="codexStatus">—</p></article>
+      <article><h2>工作目录</h2><p id="workspace">—</p></article>
+      <article><h2>局域网</h2><p id="lanOrigin">—</p></article>
+      <article><h2>远程隧道</h2><p id="tunnelOrigin">—</p></article>
+      <article><h2>可选工具</h2><p id="toolStatus">—</p></article>
+    </section>
+
+    <section id="connectionPanel" class="panel-connection" hidden>
+      <div>
+        <p class="eyebrow">PHONE ACCESS</p>
+        <h2>手机连接</h2>
+        <p id="connectionUrl">—</p>
+        <p id="connectionError" class="panel-error" role="alert"></p>
+        <button id="copyConnection" type="button" disabled>复制连接地址</button>
+      </div>
+      <img id="connectionQr" alt="手机连接二维码" hidden>
+    </section>
+
+    <section class="panel-diagnostics" aria-labelledby="diagnosticsTitle">
+      <p class="eyebrow">LOCAL DIAGNOSTICS</p>
+      <h2 id="diagnosticsTitle">最近诊断</h2>
+      <ol id="diagnostics"><li>暂无诊断信息</li></ol>
+    </section>
+
+    <div class="panel-actions" id="panelActions" hidden>
+      <button id="generateConnection" type="button">生成手机连接</button>
+      <button id="refreshPanel" type="button">刷新状态</button>
+      <button id="stopService" class="danger" type="button">安全停止服务</button>
+    </div>
+  </main>
+</body>
+</html>

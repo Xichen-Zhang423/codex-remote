@@ -1,0 +1,13 @@
+{
+  "requestPermissions": [
+    { "name": "ohos.permission.INTERNET" },
+    {
+      "name": "ohos.permission.CAMERA",
+      "reason": "$string:codex_remote_camera_reason",
+      "usedScene": {
+        "abilities": ["EntryAbility"],
+        "when": "inuse"
+      }
+    }
+  ]
+}

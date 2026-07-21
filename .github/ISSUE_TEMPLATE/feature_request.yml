@@ -1,0 +1,29 @@
+name: Feature request
+description: 提议一个可验证的产品改进
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes: { label: 要解决的问题 }
+    validations: { required: true }
+  - type: textarea
+    id: outcome
+    attributes: { label: 期望结果 }
+    validations: { required: true }
+  - type: textarea
+    id: alternatives
+    attributes: { label: 替代方案 }
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 影响范围
+      options: [Windows 服务, 手机 PWA, Android, HarmonyOS NEXT, Cloudflare, 文档]
+    validations: { required: true }
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: 安全确认
+      options:
+        - label: 内容不包含 token、二维码、config.json 或凭据。
+          required: true

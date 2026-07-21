@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' http: https: ws: wss:; worker-src 'self' blob:; manifest-src 'self'">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d0c">
+  <meta name="color-scheme" content="dark">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Codex Remote">
+  <meta name="description" content="在手机上安全查看与控制本机 Codex 工作流。">
+  <title>Codex Remote · Field Console</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-16.png" sizes="16x16" type="image/png">
+  <link rel="icon" href="icons/icon-32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-180.png" sizes="180x180">
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="jsqr.min.js"></script>
+  <script defer src="artifact-ui.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="ambient-grid" aria-hidden="true"></div>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <button id="brandBtn" class="brand" type="button" aria-label="返回当前任务底部">
+        <span class="brand-mark" aria-hidden="true"><span>C</span><span>X</span></span>
+        <span class="brand-copy">
+          <strong>CODEX REMOTE</strong>
+          <small>FIELD CONSOLE / 01</small>
+        </span>
+      </button>
+
+      <div class="signal-cluster" aria-label="连接状态">
+        <span id="connectionDot" class="signal-dot is-offline" aria-hidden="true"></span>
+        <span id="connectionText">等待连接</span>
+        <button id="artifactsBtn" class="icon-button artifact-trigger" type="button" aria-label="打开任务产出" title="任务产出" hidden>
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7.5h6l2-2h8v13H4Z"/><path d="M8 11h8M8 14.5h5"/></svg>
+          <span id="artifactBadge" class="artifact-badge" hidden>0</span>
+        </button>
+        <button id="historyBtn" class="icon-button" type="button" aria-label="打开会话历史" title="会话历史">
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.3-5.8M3.5 4.5v5h5M12 7.5V12l3 2"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <section class="context-rail" aria-label="当前 Codex 上下文">
+      <button id="modelBtn" class="context-cell" type="button">
+        <span class="context-label">MODEL</span>
+        <strong id="currentModel">Codex 默认</strong>
+      </button>
+      <button id="cwdBtn" class="context-cell context-workspace" type="button">
+        <span class="context-label">WORKSPACE</span>
+        <strong id="currentCwd">等待同步…</strong>
+      </button>
+      <button id="screenBtn" class="context-action" type="button" aria-label="查看电脑屏幕">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+        <span>屏幕</span>
+      </button>
+      <button id="settingsBtn" class="context-action" type="button" aria-label="打开设置">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 15.25A3.25 3.25 0 1 0 12 8.75a3.25 3.25 0 0 0 0 6.5Z"/><path d="M19.1 13.4a7.8 7.8 0 0 0 .05-2.8l2-1.5-2-3.45-2.5 1a8 8 0 0 0-2.4-1.4L13.9 2h-4l-.45 3.25a8 8 0 0 0-2.4 1.4l-2.5-1-2 3.45 2 1.5a7.8 7.8 0 0 0 .05 2.8l-2.05 1.5 2 3.45 2.55-1a8 8 0 0 0 2.35 1.4L9.9 22h4l.4-3.25a8 8 0 0 0 2.4-1.4l2.45 1 2-3.45-2.05-1.5Z"/></svg>
+        <span>设置</span>
+      </button>
+    </section>
+
+    <div class="run-strip" aria-live="polite">
+      <span id="runState" class="run-state"><i aria-hidden="true"></i>空闲</span>
+      <span id="queueState" class="queue-state">队列 0</span>
+      <span id="tunnelState" class="tunnel-state">公网隧道未知</span>
+    </div>
+
+    <main id="messages" class="work-canvas" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Codex 工作记录">
+      <section id="emptyState" class="empty-state">
+        <div class="empty-index" aria-hidden="true">01 / READY</div>
+        <h1>把下一步工作<br>交给 <em>Codex</em></h1>
+        <p>从真实任务开始。工作过程、命令、文件变更与审批会按时间留在这张现场记录上。</p>
+        <div class="starter-grid" aria-label="起始任务">
+          <button type="button" data-starter="检查当前工作区的状态，指出最值得先处理的问题。">
+            <span>检查现场</span><small>读取状态并给出优先级</small>
+          </button>
+          <button type="button" data-starter="运行与当前项目匹配的测试，定位失败原因并修复。">
+            <span>测试与修复</span><small>验证、诊断、落实修改</small>
+          </button>
+          <button type="button" data-starter="审查当前未提交的改动，检查正确性、安全性和可维护性。">
+            <span>审查改动</span><small>聚焦真实风险与回归</small>
+          </button>
+        </div>
+      </section>
+    </main>
+
+    <nav id="quickCommands" class="quick-commands" aria-label="快捷任务"></nav>
+
+    <footer class="composer-wrap">
+      <div id="attachments" class="attachments" aria-label="待发送图片" hidden></div>
+      <form id="composer" class="composer">
+        <label class="sr-only" for="input">发送给 Codex</label>
+        <textarea id="input" rows="1" maxlength="200000" placeholder="描述任务，Shift + Enter 换行…" enterkeyhint="send"></textarea>
+        <div class="composer-tools">
+          <div class="composer-tools-left">
+            <button id="attachBtn" class="tool-button" type="button" aria-label="添加图片" title="添加图片">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m20.5 11.5-8.2 8.2a6 6 0 0 1-8.5-8.5l8.7-8.7a4 4 0 0 1 5.65 5.65L9.8 16.5a2 2 0 0 1-2.8-2.85l7.7-7.7"/></svg>
+            </button>
+            <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            <button id="micBtn" class="tool-button" type="button" aria-label="语音输入" title="语音输入">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/></svg>
+            </button>
+            <span id="composerHint" class="composer-hint">可附 4 张图</span>
+          </div>
+          <div class="composer-actions">
+            <button id="stopBtn" class="stop-button" type="button" hidden>
+              <span aria-hidden="true"></span>中断
+            </button>
+            <button id="sendBtn" class="send-button" type="submit">
+              <span>发送</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 14-7-4.5 14-3-5.5L5 12Z"/><path d="m11.5 13.5 3-3"/></svg>
+            </button>
+          </div>
+        </div>
+      </form>
+    </footer>
+  </div>
+
+  <button id="drawerBackdrop" class="drawer-backdrop" type="button" aria-label="关闭面板" hidden></button>
+
+  <aside id="historyDrawer" class="drawer drawer-left history-drawer" aria-labelledby="historyTitle" hidden>
+    <header class="drawer-head">
+      <div><span class="eyebrow">THREAD INDEX</span><h2 id="historyTitle">会话记录</h2></div>
+      <button class="icon-button drawer-close" type="button" data-close-drawer aria-label="关闭会话记录">×</button>
+    </header>
+    <div class="drawer-toolbar">
+      <label class="search-field">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+        <input id="conversationSearch" type="search" placeholder="搜索标题或路径" autocomplete="off">
+      </label>
+      <button id="newConversationBtn" class="signal-button" type="button">＋ 新会话</button>
+    </div>
+    <div id="conversationList" class="conversation-list" aria-live="polite"></div>
+  </aside>
+
+  <aside id="artifactsDrawer" class="drawer drawer-right artifact-drawer" aria-labelledby="artifactsTitle" hidden>
+    <header class="drawer-head">
+      <div><span class="eyebrow">CODEX / OUTPUTS</span><h2 id="artifactsTitle">任务产出</h2></div>
+      <button id="artifactRefreshBtn" class="icon-button" type="button" aria-label="刷新任务产出" title="刷新任务产出">
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.9-4M4 4v5h5M4 13a8 8 0 0 0 14.9 4M20 20v-5h-5"/></svg>
+      </button>
+    </header>
+    <p id="artifactStatus" class="artifact-status" role="status" aria-live="polite">选择任务后查看产出。</p>
+    <div id="artifactList" class="artifact-list" aria-label="任务产出文件"></div>
+  </aside>
+
+  <aside id="settingsDrawer" class="drawer drawer-right settings-drawer" aria-labelledby="settingsTitle" hidden>
+    <header class="drawer-head">
+      <div><span class="eyebrow">CONSOLE SETUP</span><h2 id="settingsTitle">运行设置</h2></div>
+      <button class="icon-button drawer-close" type="button" data-close-drawer aria-label="关闭设置">×</button>
+    </header>
+    <div class="settings-stack">
+      <section class="settings-block">
+        <div class="settings-heading"><h3>连接电脑</h3><span id="backendStatus">未配置</span></div>
+        <p>连接密钥只保存在此设备的浏览器存储中，不会显示在界面或写入日志。</p>
+        <div class="button-row">
+          <button id="scanBtn" class="secondary-button" type="button">扫描连接码</button>
+          <button id="reconnectBtn" class="secondary-button" type="button">立即重连</button>
+        </div>
+        <label class="field-label" for="backendUrl">也可粘贴完整连接网址</label>
+        <div class="inline-field">
+          <input id="backendUrl" type="url" inputmode="url" placeholder="https://…/?token=…" autocomplete="off" spellcheck="false">
+          <button id="saveBackendBtn" type="button">保存</button>
+        </div>
+      </section>
+
+      <section class="settings-block">
+        <h3>Codex 配置</h3>
+        <label class="field-label" for="modelSelect">模型</label>
+        <select id="modelSelect"><option value="">使用 Codex 默认模型</option></select>
+        <label class="field-label" for="effortSelect">推理强度</label>
+        <select id="effortSelect"><option value="">使用默认强度</option></select>
+        <button id="browseCwdBtn" class="workspace-button" type="button">
+          <span><small>当前工作目录</small><strong id="settingsCwd">等待同步…</strong></span>
+          <span aria-hidden="true">浏览 →</span>
+        </button>
+      </section>
+
+      <section class="settings-block safety-block">
+        <div class="toggle-line">
+          <div><h3>本次服务自动审批</h3><p>仅自动处理可证明为只读的命令；重启服务后自动关闭。</p></div>
+          <label class="switch"><input id="sessionAutoToggle" type="checkbox"><span aria-hidden="true"></span><span class="sr-only">切换本次服务自动审批</span></label>
+        </div>
+        <div class="toggle-line">
+          <div><h3>后台完成提醒</h3><p id="notificationStatus">任务完成后振动并发送系统通知。</p></div>
+          <label class="switch"><input id="notificationToggle" type="checkbox"><span aria-hidden="true"></span><span class="sr-only">切换后台完成提醒</span></label>
+        </div>
+      </section>
+
+      <section class="settings-block">
+        <h3>快捷任务</h3>
+        <p>每行使用“名称 | 提示词”，最多显示 6 项。</p>
+        <textarea id="quickEditor" rows="7" spellcheck="false"></textarea>
+        <div class="button-row">
+          <button id="saveQuickBtn" class="signal-button" type="button">保存快捷任务</button>
+          <button id="resetQuickBtn" class="quiet-button" type="button">恢复默认</button>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <aside id="workspaceDrawer" class="drawer drawer-right" aria-labelledby="workspaceTitle" hidden>
+    <header class="drawer-head">
+      <div><span class="eyebrow">WORKSPACE MAP</span><h2 id="workspaceTitle">切换工作目录</h2></div>
+      <button class="icon-button drawer-close" type="button" data-close-drawer aria-label="关闭目录浏览器">×</button>
+    </header>
+    <div class="workspace-pathbar">
+      <button id="directoryUpBtn" class="icon-button" type="button" aria-label="返回上一级">↑</button>
+      <code id="directoryPath">—</code>
+    </div>
+    <div id="directoryList" class="directory-list" aria-live="polite"></div>
+    <div class="workspace-footer">
+      <div class="inline-field">
+        <input id="mkdirName" type="text" maxlength="120" placeholder="新文件夹名称">
+        <button id="mkdirBtn" type="button">新建</button>
+      </div>
+      <button id="useDirectoryBtn" class="signal-button wide" type="button">在此目录开始新会话</button>
+    </div>
+  </aside>
+
+  <section id="approvalSheet" class="approval-sheet" role="dialog" aria-modal="true" aria-labelledby="approvalTitle" hidden>
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <header class="approval-head">
+      <div class="risk-beacon" aria-hidden="true">!</div>
+      <div><span id="approvalKind" class="eyebrow">ACTION REVIEW</span><h2 id="approvalTitle">Codex 请求确认</h2></div>
+      <span id="approvalCount" class="approval-count">1 / 1</span>
+    </header>
+    <div id="approvalBody" class="approval-body"></div>
+    <form id="approvalForm" class="approval-form"></form>
+    <div id="approvalActions" class="approval-actions"></div>
+  </section>
+
+  <section id="screenViewer" class="full-modal" role="dialog" aria-modal="true" aria-labelledby="screenTitle" hidden>
+    <header class="full-modal-head">
+      <div><span class="eyebrow">WINDOWS FEED</span><h2 id="screenTitle">电脑屏幕</h2></div>
+      <div class="modal-head-actions">
+        <label class="compact-toggle"><input id="screenAuto" type="checkbox"><span>自动刷新</span></label>
+        <button id="screenCloseBtn" class="icon-button" type="button" aria-label="关闭屏幕视图">×</button>
+      </div>
+    </header>
+    <div id="screenStage" class="screen-stage">
+      <img id="screenImage" alt="电脑屏幕实时截图" draggable="false" hidden>
+      <div id="screenHint" class="screen-hint"><span aria-hidden="true">⌁</span><p>点击刷新，从电脑获取一帧屏幕画面。</p></div>
+    </div>
+    <footer class="screen-footer">
+      <button id="screenRefreshBtn" class="secondary-button" type="button">刷新画面</button>
+      <button id="openControlBtn" class="signal-button" type="button">进入全屏遥控</button>
+    </footer>
+  </section>
+
+  <section id="artifactPreview" class="full-modal artifact-preview" role="dialog" aria-modal="true" aria-labelledby="artifactPreviewTitle" hidden>
+    <header class="full-modal-head">
+      <div class="artifact-preview-heading">
+        <span class="eyebrow">TASK ARTIFACT</span>
+        <h2 id="artifactPreviewTitle">任务产出</h2>
+        <p id="artifactPreviewMeta"></p>
+      </div>
+      <button id="artifactPreviewCloseBtn" class="icon-button" type="button" aria-label="关闭产出预览">×</button>
+    </header>
+    <div id="artifactPreviewBody" class="artifact-preview-body" tabindex="0" aria-live="polite"></div>
+    <footer class="artifact-preview-actions">
+      <div class="artifact-page-controls">
+        <button id="artifactPrevPageBtn" class="secondary-button" type="button">上一页</button>
+        <span id="artifactPageStatus" aria-live="polite"></span>
+        <button id="artifactNextPageBtn" class="secondary-button" type="button">下一页</button>
+        <button id="artifactFitBtn" class="secondary-button" type="button">适合宽度</button>
+      </div>
+      <button id="artifactDownloadBtn" class="signal-button" type="button">下载文件</button>
+    </footer>
+  </section>
+
+  <section id="controlViewer" class="control-viewer" role="dialog" aria-modal="true" aria-label="全屏电脑遥控" hidden>
+    <header class="control-head">
+      <div class="control-live"><i aria-hidden="true"></i><span>REMOTE INPUT</span></div>
+      <div>
+        <button id="controlRefreshBtn" class="icon-button" type="button" aria-label="刷新遥控画面">↻</button>
+        <button id="controlResetBtn" class="icon-button" type="button" aria-label="重置缩放">1×</button>
+        <button id="controlExitBtn" class="icon-button" type="button" aria-label="退出全屏遥控">×</button>
+      </div>
+    </header>
+    <div id="controlStage" class="control-stage">
+      <div id="controlTransform" class="control-transform">
+        <img id="controlImage" alt="可控制的电脑屏幕" draggable="false">
+      </div>
+      <span id="controlRipple" class="control-ripple" aria-hidden="true"></span>
+      <div id="controlHint" class="control-hint">单击模式 · 长按可右键 · 双指缩放</div>
+    </div>
+    <div class="control-dock">
+      <div class="control-mode" role="group" aria-label="鼠标动作">
+        <button class="is-active" type="button" data-pointer-action="click" aria-pressed="true">单击</button>
+        <button type="button" data-pointer-action="dblclick" aria-pressed="false">双击</button>
+        <button type="button" data-pointer-action="rclick" aria-pressed="false">右键</button>
+        <button type="button" data-pointer-action="move" aria-pressed="false">移动</button>
+      </div>
+      <div class="key-grid" aria-label="常用键盘按键">
+        <button type="button" data-key="{ESC}">Esc</button>
+        <button type="button" data-key="{TAB}">Tab</button>
+        <button type="button" data-key="{ENTER}">Enter</button>
+        <button type="button" data-key="{BACKSPACE}">⌫</button>
+        <button type="button" data-key="{UP}">↑</button>
+        <button type="button" data-key="{LEFT}">←</button>
+        <button type="button" data-key="{DOWN}">↓</button>
+        <button type="button" data-key="{RIGHT}">→</button>
+        <button type="button" data-combo="alttab">Alt+Tab</button>
+        <button type="button" data-combo="win">Win</button>
+        <button type="button" data-combo="wind">Win+D</button>
+        <button type="button" data-combo="wintab">Win+Tab</button>
+      </div>
+      <div class="control-type">
+        <input id="controlText" type="text" maxlength="4000" placeholder="向电脑输入文字…" autocomplete="off">
+        <button id="controlTypeBtn" type="button">输入</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="scannerModal" class="scanner-modal" role="dialog" aria-modal="true" aria-labelledby="scannerTitle" hidden>
+    <header><div><span class="eyebrow">PAIR DEVICE</span><h2 id="scannerTitle">扫描电脑连接码</h2></div><button id="scannerCloseBtn" class="icon-button" type="button" aria-label="关闭扫码">×</button></header>
+    <div class="scanner-frame"><video id="scannerVideo" playsinline muted></video><div class="scan-corners" aria-hidden="true"></div></div>
+    <p id="scannerHint">请允许相机权限，并将二维码放入框内。</p>
+    <canvas id="scannerCanvas" hidden></canvas>
+  </section>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  <noscript><div class="noscript">Codex Remote 需要 JavaScript 才能连接电脑。</div></noscript>
+</body>
+</html>
