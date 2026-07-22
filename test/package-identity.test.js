@@ -116,6 +116,7 @@ test("Windows launchers start and stop only this absolute Codex Remote process t
   assert.match(stop, /ProcessId=.*candidate\.ProcessId/i);
   assert.match(stop, /currentTicks.*candidate\.CreationTicks/i);
   assert.match(stop, /\[regex\]::IsMatch/);
+  assert.match(stop, /\$optionalQuote=.*\$q[\s\S]*\$pattern=\$node\+\$optionalQuote[\s\S]*\+\$optionalQuote\+/);
   assert.doesNotMatch(stop, /taskkill|\/IM\s+node|cloudflared\.exe/i);
 
   const setup = read("设置开机自启.bat");
