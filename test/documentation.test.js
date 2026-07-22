@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (name) => fs.readFileSync(path.join(root, name), "utf8");
 
-test("README is a standalone first-run journey", () => {
+test("README is a standalone GitHub introduction and first-run journey", () => {
   const readme = read("README.md");
   const ordered = [
-    "安全边界", "运行要求", "codex login status", "start.bat", "手机连接", "添加到主屏幕",
-    "任务产出", "批准", "局域网", "屏幕", "停止", "Android", "HarmonyOS NEXT",
-    "iPhone / iPad", "故障排查", "隐私", "CONTRIBUTING.md", "SECURITY.md", "LICENSE", "发布检查清单",
+    "手机遥控 Codex", "English", "核心能力", "界面预览", "五分钟开始", "运行要求",
+    "codex login status", "start.bat", "手机连接", "添加到主屏幕", "任务产出", "逐项批准",
+    "局域网", "屏幕查看", "安全边界", "停止与移除", "Android", "iPhone / iPad",
+    "HarmonyOS NEXT", "配置", "项目结构", "故障排查", "GitHub 发布与备份", "开源与贡献",
   ];
   let cursor = -1;
   for (const phrase of ordered) {
@@ -24,21 +25,37 @@ test("README is a standalone first-run journey", () => {
   assert.match(readme, /npx --yes --package @openai\/codex@0\.144\.1 codex login\s/);
   assert.match(readme, /npx --yes --package @openai\/codex@0\.144\.1 codex login status/);
   assert.match(readme, /%LOCALAPPDATA%\\CodexRemote\\runtime[\s\S]*%LOCALAPPDATA%\\CodexRemote\\npm-cache/);
-  assert.match(readme, /二维码[\s\S]*失败[\s\S]*继续运行[\s\S]*复制/);
+  assert.match(readme, /二维码[\s\S]*渲染失败[\s\S]*继续运行[\s\S]*复制/);
   assert.match(readme, /删除[\s\S]*%LOCALAPPDATA%\\CodexRemote[\s\S]*不要删除[\s\S]*工作区[\s\S]*%USERPROFILE%\\\.codex/);
-  assert.match(readme, /私下报告漏洞：\[SECURITY\.md\]\(\.\/SECURITY\.md\)/);
-  assert.doesNotMatch(readme, /隐私报告[^\n]*SECURITY\.md/);
-  assert.doesNotMatch(readme, /\.\.\/|example\.com|OWNER\/REPO|npm publish|原生 iOS|Electron|MSIX|已签名商店包/i);
+  assert.match(readme, /iPhone \/ iPad[\s\S]*不(?:创建|提供)[\s\S]*(?:Xcode|原生 iOS)/);
+  assert.match(readme, /私下报告安全问题[\s\S]*\[SECURITY\.md\]\(\.\/SECURITY\.md\)/);
+  assert.doesNotMatch(readme, /\.\.\/|example\.com|OWNER\/REPO|npm publish|Electron|MSIX|已签名商店包/i);
   assert.equal(readme.includes("\uFFFD"), false);
 });
 
-test("README states the security approval artifact and platform boundaries", () => {
+test("README states security approval artifact and platform boundaries", () => {
   const readme = read("README.md");
-  assert.match(readme, /官方 Codex CLI[\s\S]*登录[\s\S]*不会[\s\S]*(?:复制|上传)[\s\S]*认证/);
-  assert.match(readme, /二维码[\s\S]*\?token=[\s\S]*config\.json[\s\S]*(?:密码|敏感)/);
+  assert.match(readme, /官方 Codex CLI[\s\S]*登录[\s\S]*不复制[\s\S]*认证/);
+  assert.match(readme, /二维码[\s\S]*原始连接链接[\s\S]*config\.json[\s\S]*敏感/);
   assert.match(readme, /本次产出[\s\S]*不可变[\s\S]*256 MiB[\s\S]*60 秒/);
   assert.match(readme, /逐项批准[\s\S]*会话自动批准[\s\S]*重启[\s\S]*关闭/);
-  assert.match(readme, /Android[\s\S]*Debug APK[\s\S]*HarmonyOS NEXT[\s\S]*手工签名[\s\S]*iPhone \/ iPad[\s\S]*Safari/);
+  assert.match(readme, /Android[\s\S]*Debug APK[\s\S]*iPhone \/ iPad[\s\S]*Safari[\s\S]*HarmonyOS NEXT[\s\S]*手工签名/);
+});
+
+test("GitHub guide covers independent first push bundle verification and recovery", () => {
+  const readme = read("README.md");
+  const guide = read("docs/GitHub发布与备份.md");
+  const batch = read("创建Git备份.bat");
+  const backup = read("scripts/create-git-backup.ps1");
+  const legacyRepository = ["cla", "ude-remote"].join("");
+  assert.match(readme, /独立[\s\S]*codex-remote[\s\S]*GitHub 发布与备份/);
+  assert.match(guide, /创建空仓库[\s\S]*git remote add origin[\s\S]*git push -u origin main/);
+  assert.match(guide, /Git Credential Manager[\s\S]*浏览器/);
+  assert.match(guide, /git(?: -C \.)? bundle verify[\s\S]*git clone[^\n]*\.bundle/);
+  assert.match(guide, /脏工作树|未提交修改/);
+  assert.match(batch, /scripts\\create-git-backup\.ps1/i);
+  assert.match(backup, /\[git-backup\] OK/);
+  assert.doesNotMatch(`${readme}\n${guide}`, new RegExp(`Xichen-Zhang423/${legacyRepository}|https://github\\.com/[^\\s]+/${legacyRepository}`, "i"));
 });
 
 test("platform and connection guides retain their exact delivery boundaries", () => {

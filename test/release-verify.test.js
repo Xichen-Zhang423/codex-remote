@@ -384,6 +384,24 @@ test("forbidden PNG validator accepts manifest and HTML icon links", (t) => {
   assert.deepEqual(validateForbiddenFiles(root).filter((line) => line.includes("unreferenced PNG")), []);
 });
 
+test("forbidden PNG validator accepts only README-linked showcase images under docs/images", (t) => {
+  const root = fixture(t);
+  fs.mkdirSync(path.join(root, "docs", "images"), { recursive: true });
+  fs.writeFileSync(path.join(root, "docs", "images", "showcase.png"), "png");
+  fs.writeFileSync(path.join(root, "docs", "images", "showcase-html.png"), "png");
+  fs.writeFileSync(path.join(root, "docs", "images", "unused.png"), "png");
+  fs.writeFileSync(path.join(root, "public", "not-an-icon.png"), "png");
+  fs.writeFileSync(path.join(root, "README.md"), [
+    "![showcase](./docs/images/showcase.png?raw=1)",
+    '<img src="./docs/images/showcase-html.png" alt="showcase">',
+    "![outside](./public/not-an-icon.png)",
+  ].join("\n"));
+  assert.deepEqual(validateForbiddenFiles(root).filter((line) => line.includes("unreferenced PNG")), [
+    "docs/images/unused.png: unreferenced PNG is forbidden",
+    "public/not-an-icon.png: unreferenced PNG is forbidden",
+  ]);
+});
+
 test("the actual product tree passes deterministic non-Git checks", () => {
   const realProductRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   assert.deepEqual(verifyRelease(realProductRoot, { allowDirty: true }), []);

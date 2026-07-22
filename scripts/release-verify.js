@@ -334,6 +334,7 @@ const FIXED_NATIVE_PNG = /^(?:app-android\/resources\/mipmap-(?:mdpi|hdpi|xhdpi|
 export function validateForbiddenFiles(root) {
   const errors = [];
   let publicIcons = new Set();
+  const readmeImages = new Set();
   try {
     const manifest = parseJson(path.join(root, "public", "manifest.webmanifest"));
     publicIcons = new Set((manifest.icons ?? []).map((icon) => slash(path.join("public", icon.src))));
@@ -348,6 +349,25 @@ export function validateForbiddenFiles(root) {
       if (inside(path.join(root, "public"), target)) publicIcons.add(slash(path.relative(root, target)));
     }
   } catch { /* required-path and PWA validators report the missing or malformed shell */ }
+  try {
+    const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+    const imageRoot = path.join(root, "docs", "images");
+    const addReadmeImage = (raw) => {
+      if (!raw || /^(?:https?:|data:|\/\/)/i.test(raw)) return;
+      const encodedPath = raw.split(/[?#]/, 1)[0];
+      let decoded;
+      try { decoded = decodeURIComponent(encodedPath); }
+      catch { return; }
+      const target = path.resolve(root, decoded);
+      if (inside(imageRoot, target) && target.toLowerCase().endsWith(".png"))
+        readmeImages.add(slash(path.relative(root, target)));
+    };
+    for (const raw of markdownDestinations(readme)) addReadmeImage(raw);
+    for (const tag of readme.matchAll(/<img\b[^>]*>/gi)) {
+      const src = /\bsrc=["']([^"']+)["']/i.exec(tag[0])?.[1];
+      addReadmeImage(src);
+    }
+  } catch { /* required-path and Markdown validators report a missing or malformed README */ }
   const files = walk(root, root, {
     linkErrors: errors,
     onDirectory(relative) {
@@ -362,7 +382,8 @@ export function validateForbiddenFiles(root) {
     if (["config.json", "runtime-state.json", ".env"].includes(base)
       || base.startsWith(".env.") || FORBIDDEN_EXT.test(relative))
       errors.push(`${relative}: forbidden release file`);
-    if (relative.toLowerCase().endsWith(".png") && !publicIcons.has(relative) && !FIXED_NATIVE_PNG.test(relative))
+    if (relative.toLowerCase().endsWith(".png") && !publicIcons.has(relative)
+      && !readmeImages.has(relative) && !FIXED_NATIVE_PNG.test(relative))
       errors.push(`${relative}: unreferenced PNG is forbidden`);
   }
   return sorted(errors);
