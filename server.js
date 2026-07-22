@@ -56,7 +56,7 @@ export function selectPhoneBaseUrl({
     || entry.address.startsWith("192.168.")
     || /^172\.(1[6-9]|2\d|3[01])\./.test(entry.address)
   );
-  const virtualAdapter = /(?:vethernet|wsl|docker|vmware|virtualbox|hyper-v|tailscale|zerotier|loopback|bluetooth)/i;
+  const virtualAdapter = /(?:vethernet|wsl|docker|vmware|virtualbox|hyper-v|tailscale|zerotier|loopback|bluetooth|xray|wintun|wireguard|openvpn|vpn)/i;
   const physical = candidates.filter((entry) => !virtualAdapter.test(entry.adapter));
   const selected = physical.find(isPrivate) ?? physical[0] ?? candidates.find(isPrivate) ?? candidates[0];
   const address = selected?.address ?? "127.0.0.1";

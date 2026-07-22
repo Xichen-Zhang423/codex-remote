@@ -28,6 +28,18 @@ test("selectPhoneBaseUrl falls back to loopback when no LAN address exists", () 
   assert.equal(selectPhoneBaseUrl({ env: {}, port: 8766, interfaces: {} }), "http://127.0.0.1:8766");
 });
 
+test("selectPhoneBaseUrl ignores VPN tunnel adapters before choosing WLAN", () => {
+  const interfaces = {
+    xray_tun: [{ address: "172.18.0.1", family: "IPv4", internal: false }],
+    Tailscale: [{ address: "100.104.123.11", family: "IPv4", internal: false }],
+    WLAN: [{ address: "10.38.7.142", family: "IPv4", internal: false }],
+  };
+  assert.equal(
+    selectPhoneBaseUrl({ env: {}, port: 8766, interfaces }),
+    "http://10.38.7.142:8766",
+  );
+});
+
 test("isTunnelEnabled supports the dedicated switch and legacy NO_TUNNEL", () => {
   assert.equal(isTunnelEnabled({}), true);
   for (const value of ["0", "false", "off", "no"]) {
