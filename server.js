@@ -2,6 +2,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
 import qrTerminal from "qrcode-terminal";
 import qrImage from "qrcode";
 import { loadConfig } from "./src/config.js";
@@ -77,6 +78,45 @@ export function isTunnelEnabled(env = process.env) {
   return true;
 }
 
+export function createWindowsKeepAwake({
+  platform = process.platform,
+  spawnImpl = spawn,
+  onError = () => {},
+} = {}) {
+  let child = null;
+  return {
+    get active() { return Boolean(child); },
+    start() {
+      if (platform !== "win32" || child) return false;
+      const command = [
+        "$signature = '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint flags);';",
+        "$type = Add-Type -MemberDefinition $signature -Name NativePower -Namespace CodexRemote -PassThru;",
+        "while ($true) { [void]$type::SetThreadExecutionState(2147483649); Start-Sleep -Seconds 45 }",
+      ].join(" ");
+      try {
+        const owned = spawnImpl("powershell.exe", [
+          "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", command,
+        ], { stdio: "ignore", windowsHide: true });
+        child = owned;
+        const release = () => { if (child === owned) child = null; };
+        owned.once?.("exit", release);
+        owned.once?.("error", (cause) => { release(); onError(cause); });
+        return true;
+      } catch (cause) {
+        onError(cause);
+        return false;
+      }
+    },
+    stop() {
+      if (!child) return false;
+      const owned = child;
+      child = null;
+      try { owned.kill?.(); } catch (cause) { onError(cause); }
+      return true;
+    },
+  };
+}
+
 function showPhoneAccess({ baseUrl, token, rendezvous, label, log, onError, qrGenerate }) {
   log(`${label}: ${baseUrl}`);
   log("Scan this QR code with your phone:");
@@ -133,6 +173,7 @@ export async function main(options = {}) {
     createWindowsRemote = (settings) => new WindowsRemote(settings),
     createRemoteServerImpl = createRemoteServer,
     createTunnel = (settings) => new TunnelManager(settings),
+    createKeepAwake = (settings) => createWindowsKeepAwake(settings),
     qrGenerate = qrTerminal.generate.bind(qrTerminal),
     qrToDataUrl = (url) => qrImage.toDataURL(url, { width: 360, margin: 2 }),
     createPanelSessionImpl = createPanelSession,
@@ -170,6 +211,7 @@ export async function main(options = {}) {
   let panelSession = null;
   let phoneBaseUrl = null;
   let tunnel = null;
+  let keepAwake = null;
   let tunnelOrigin = null;
   let codexStatus = "checking";
   let adapterOwnedByRemote = false;
@@ -258,6 +300,13 @@ export async function main(options = {}) {
   }
 
   log(`Codex Remote is running at ${remote.httpUrl}`);
+  try {
+    keepAwake = createKeepAwake({ platform, onError: (cause) => reportDiagnostic("power", cause) });
+    keepAwake?.start?.();
+  } catch (cause) {
+    reportDiagnostic("power", cause);
+    keepAwake = null;
+  }
   phoneBaseUrl = selectPhoneBaseUrl({ env, port: remote.address.port });
   log(`Desktop panel: ${panelSession.panelUrl(remote.httpUrl)}`);
   showPhoneAccess({
@@ -327,6 +376,7 @@ export async function main(options = {}) {
       if (tunnel && tunnelListener) tunnel.off?.("status", tunnelListener);
       const failures = [];
       try { await tunnel?.stop?.(); } catch (cause) { failures.push(cause); }
+      try { await keepAwake?.stop?.(); } catch (cause) { failures.push(cause); }
       try { await remote.close(); } catch (cause) { failures.push(cause); }
       try { await artifactTickets.close?.(); } catch (cause) { failures.push(cause); }
       try { await artifactTracker.close(); } catch (cause) { failures.push(cause); }
@@ -348,7 +398,7 @@ export async function main(options = {}) {
     process.once("SIGINT", shutdown);
     process.once("SIGTERM", shutdown);
   }
-  return { ...remote, tunnel, windowsRemote, close };
+  return { ...remote, tunnel, windowsRemote, keepAwake, close };
 }
 
 const isEntryPoint = process.argv[1]

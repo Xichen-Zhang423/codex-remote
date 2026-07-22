@@ -20,7 +20,7 @@ test("README presents the product and links every redacted showcase image", () =
     assert.equal(bytes.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", image);
     assert.ok(bytes.length < 500_000, `${image} should remain repository-friendly`);
   }
-  assert.doesNotMatch(readme, /\?token=|trycloudflare\.com|[A-Z]:\\Users\\|D:\\EdgeDownload/i);
+  assert.doesNotMatch(readme, /\?token=|https:\/\/[a-z0-9-]+\.trycloudflare\.com|[A-Z]:\\Users\\|D:\\EdgeDownload/i);
 });
 
 test("publishing documentation is reachable from README and never targets the previous remote", () => {

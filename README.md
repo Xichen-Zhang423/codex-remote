@@ -67,7 +67,7 @@ Codex Remote is a self-hosted, mobile-first remote console for the local OpenAI 
 - Windows 10 或 Windows 11
 - Node.js 18 或更高版本，建议当前 LTS
 - 同一 Windows 用户下已完成 Codex 登录
-- 可选：可信的 `cloudflared.exe`，用于公网 Quick Tunnel
+- 出门远程使用必需：可信的 `cloudflared.exe`，用于公网 Quick Tunnel
 - 可选但建议：可信的 Windows 版 `ffmpeg.exe`，用于稳定全屏截图
 
 在独立仓库根目录打开 PowerShell：
@@ -82,12 +82,12 @@ npx --yes --package @openai/codex@0.144.1 codex login status
 
 首次启动会在 `%LOCALAPPDATA%\CodexRemote\config.json` 生成本机专用的随机访问 token，默认端口为 `8766`。如果二维码渲染失败，服务仍会继续运行，本机控制台会保留可复制的连接入口。
 
-`ffmpeg.exe` 和 `cloudflared.exe` 只从独立仓库根目录或系统 `PATH` 查找，不依赖相邻遥控项目或任何父目录文件。
+`ffmpeg.exe` 和 `cloudflared.exe` 依次从独立仓库根目录、`%LOCALAPPDATA%\CodexRemote\bin` 和系统 `PATH` 查找，不依赖相邻项目或任何父目录文件。希望保持 Git 仓库纯净时，推荐把两个可执行文件放在用户本地 `bin` 目录。
 
 ## 📲 手机连接与安装
 
-1. 手机与电脑在同一局域网时，扫描启动窗口或本机面板显示的局域网二维码。
-2. Quick Tunnel 就绪后，也可以扫描 HTTPS 隧道二维码。
+1. 手机与电脑在同一局域网时，可以扫描启动窗口最先显示的局域网二维码。
+2. **准备离开电脑时，必须等待并扫描随后出现的 `Tunnel base URL` HTTPS 公网二维码。**它可以通过手机流量或其他 Wi-Fi 使用，不要求 VPN。
 3. 页面保存连接后会清理地址栏中的访问参数；仍不要转发原始二维码或连接链接。
 4. Android Chrome 选择“安装应用”或“添加到主屏幕”。
 5. iPhone / iPad 使用 Safari 分享菜单中的“添加到主屏幕”。
@@ -111,7 +111,9 @@ npx --yes --package @openai/codex@0.144.1 codex login status
 
 ## 🌐 局域网、公网隧道与中转
 
-默认会尝试启动 Cloudflare Quick Tunnel，隧道域名可能随重启变化。把可信的 `cloudflared.exe` 放到仓库根目录，或确保 `cloudflared` 位于系统 `PATH`。
+默认会尝试启动 Cloudflare Quick Tunnel，隧道域名可能随重启变化。把可信的 `cloudflared.exe` 放到 `%LOCALAPPDATA%\CodexRemote\bin`、仓库根目录，或确保 `cloudflared` 位于系统 `PATH`。服务运行期间会阻止 Windows 自动进入系统睡眠，但允许屏幕按电源设置熄灭；停止服务后该请求会自动释放。
+
+出门前请确认启动窗口已经显示 `Tunnel base URL: https://…trycloudflare.com`，用手机流量实际打开一次，再让电脑保持开机、联网并保持当前 Windows 用户登录。只有局域网二维码、电脑关机、休眠、断网或关闭启动窗口时，外网均无法连接。
 
 只使用局域网时：
 
@@ -193,7 +195,7 @@ codex-remote/
 | 依赖安装失败 | 检查网络、代理和系统盘空间；缓存位于用户本地目录，无需管理员权限。 |
 | 手机打不开局域网地址 | 确认同一 Wi-Fi、Windows 防火墙允许 Node、端口 `8766` 未被占用。 |
 | 二维码没有显示 | 服务仍会启动；从本机控制台复制连接入口。 |
-| 隧道一直离线 | 检查 `cloudflared` 与网络；设置 `NO_TUNNEL=1` 先验证局域网。 |
+| 隧道一直离线 | 确认 `%LOCALAPPDATA%\CodexRemote\bin\cloudflared.exe` 存在且来源可信；设置 `NO_TUNNEL=1` 只能验证局域网，不能用于出门远程。 |
 | 手机上看不到任务文件 | 打开当前任务的“本次产出”或历史产出抽屉；重连后元数据会恢复。 |
 | 截图黑屏、裁切或点击偏移 | 安装可信 `ffmpeg.exe` 并重启服务，不要通过降低显示缩放掩盖问题。 |
 | PWA 仍是旧界面 | 完全关闭页面后重开，必要时在浏览器站点设置中清除缓存。 |

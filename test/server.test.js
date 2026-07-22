@@ -49,6 +49,38 @@ test("isTunnelEnabled supports the dedicated switch and legacy NO_TUNNEL", () =>
   assert.equal(isTunnelEnabled({ NO_TUNNEL: "1" }), false);
 });
 
+test("Windows keep-awake owns one hidden helper and releases it on stop", async () => {
+  const server = await import("../server.js");
+  assert.equal(typeof server.createWindowsKeepAwake, "function");
+  const calls = [];
+  const child = new EventEmitter();
+  child.kill = () => { calls.push("kill"); child.emit("exit"); return true; };
+  const keepAwake = server.createWindowsKeepAwake({
+    platform: "win32",
+    spawnImpl(file, args, options) {
+      calls.push({ file, args, options });
+      return child;
+    },
+  });
+  assert.equal(keepAwake.start(), true);
+  assert.equal(keepAwake.start(), false);
+  assert.equal(calls[0].file, "powershell.exe");
+  assert.deepEqual(calls[0].args.slice(0, 4), [
+    "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+  ]);
+  assert.match(calls[0].args.at(-1), /SetThreadExecutionState[\s\S]*2147483649/);
+  assert.deepEqual(calls[0].options, { stdio: "ignore", windowsHide: true });
+  assert.equal(keepAwake.stop(), true);
+  assert.equal(keepAwake.stop(), false);
+  assert.deepEqual(calls.slice(1), ["kill"]);
+
+  const otherPlatform = server.createWindowsKeepAwake({
+    platform: "linux",
+    spawnImpl() { throw new Error("must not spawn"); },
+  });
+  assert.equal(otherPlatform.start(), false);
+});
+
 test("main opens, recovers, wires, and closes artifact services in lifecycle order", async () => {
   const events = [];
   const errors = [];
@@ -104,6 +136,10 @@ test("main opens, recovers, wires, and closes artifact services in lifecycle ord
       return remote;
     },
     createTunnel: () => tunnel,
+    createKeepAwake: () => ({
+      start() { events.push("awake:start"); return true; },
+      stop() { events.push("awake:close"); return true; },
+    }),
     qrGenerate: (_url, _options, callback) => callback("[qr]"),
   });
 
@@ -112,8 +148,8 @@ test("main opens, recovers, wires, and closes artifact services in lifecycle ord
   ]);
   assert.match(errors.join("\n"), /pending turn could not be recovered/);
   await app.close();
-  assert.deepEqual(events.slice(-5), [
-    "tunnel:close", "remote:close", "tickets:close", "tracker:close", "store:close",
+  assert.deepEqual(events.slice(-6), [
+    "tunnel:close", "awake:close", "remote:close", "tickets:close", "tracker:close", "store:close",
   ]);
 });
 

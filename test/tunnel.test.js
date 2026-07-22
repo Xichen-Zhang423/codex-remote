@@ -28,6 +28,7 @@ test("tunnel discovers split output and publishes only the base URL", async () =
   const requests = [];
   const manager = new TunnelManager({
     projectDir: "C:\\codex-remote", port: 8766, token: "phone-secret",
+    binary: process.platform === "win32" ? "cloudflared.exe" : "cloudflared",
     rendezvous: { url: "https://rendezvous.example/", secret: "publish-secret" },
     spawnImpl: (file, args, options) => { spawns.push({ file, args, options }); return child; },
     fetchImpl: async (url, options) => { requests.push({ url, options }); return { ok: true, status: 200 }; },

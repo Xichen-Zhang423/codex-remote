@@ -20,8 +20,23 @@ test("falls back to PATH lookup by command name only", () => {
   const checked = [];
   const result = resolveOptionalBinary("cloudflared.exe", {
     productRoot,
+    env: {},
     existsSync(candidate) { checked.push(candidate); return false; },
   });
   assert.equal(result, "cloudflared.exe");
   assert.deepEqual(checked, [path.join(productRoot, "cloudflared.exe")]);
+});
+
+test("uses the user-local Codex Remote bin before PATH", () => {
+  const checked = [];
+  const productRoot = path.resolve("standalone", "codex-remote");
+  const localAppData = path.resolve("user-data", "Local");
+  const managed = path.join(localAppData, "CodexRemote", "bin", "cloudflared.exe");
+  const result = resolveOptionalBinary("cloudflared.exe", {
+    productRoot,
+    env: { LOCALAPPDATA: localAppData },
+    existsSync(candidate) { checked.push(candidate); return candidate === managed; },
+  });
+  assert.equal(result, managed);
+  assert.deepEqual(checked, [path.join(productRoot, "cloudflared.exe"), managed]);
 });
