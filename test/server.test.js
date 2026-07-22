@@ -330,12 +330,15 @@ test("main wires Windows control and an owned tunnel, then closes in order", asy
   assert.deepEqual(lifecycle, ["tunnel-start"]);
   assert.equal(qrUrls[0], "http://codex-pc.local:9123/?token=literal-phone-secret&rz=https%3A%2F%2Frendezvous.example%2Fcurrent%3FdeviceId%3Ddevice-1");
   assert.equal(logs.join("\n").includes("literal-phone-secret"), false);
+  assert.equal(logs.some((message) => message.includes("[LAN ONLY / 仅局域网]")), true);
 
   tunnel.emit("status", { state: "online", url: "https://bright-river.trycloudflare.com" });
   assert.deepEqual(broadcasts.at(-1), {
     type: "tunnel", state: "online", url: "https://bright-river.trycloudflare.com",
   });
   assert.equal(qrUrls.at(-1), "https://bright-river.trycloudflare.com/?token=literal-phone-secret&rz=https%3A%2F%2Frendezvous.example%2Fcurrent%3FdeviceId%3Ddevice-1");
+  assert.equal(logs.some((message) => message.includes("[PUBLIC / 外网]")), true);
+  assert.equal(logs.some((message) => message.includes("VPN is not required")), true);
 
   await app.close();
   assert.deepEqual(lifecycle, ["tunnel-start", "tunnel-stop", "remote-close"]);

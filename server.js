@@ -117,8 +117,9 @@ export function createWindowsKeepAwake({
   };
 }
 
-function showPhoneAccess({ baseUrl, token, rendezvous, label, log, onError, qrGenerate }) {
+function showPhoneAccess({ baseUrl, token, rendezvous, label, hint, log, onError, qrGenerate }) {
   log(`${label}: ${baseUrl}`);
+  if (hint) log(hint);
   log("Scan this QR code with your phone:");
   const phoneUrl = buildPhoneUrl(baseUrl, token, rendezvous?.url, rendezvous?.deviceId);
   try {
@@ -314,6 +315,7 @@ export async function main(options = {}) {
     token: config.token,
     rendezvous: config.rendezvous,
     label: "Phone base URL",
+    hint: "[LAN ONLY / 仅局域网] Same Wi-Fi only. For travel, wait for the PUBLIC QR below.",
     log,
     onError: (cause) => reportDiagnostic("qr", cause),
     qrGenerate,
@@ -341,6 +343,7 @@ export async function main(options = {}) {
             token: config.token,
             rendezvous: config.rendezvous,
             label: "Tunnel base URL",
+            hint: "[PUBLIC / 外网] Use mobile data or any Wi-Fi. VPN is not required. Scan this one before leaving.",
             log,
             onError: (cause) => reportDiagnostic("qr", cause),
             qrGenerate,
