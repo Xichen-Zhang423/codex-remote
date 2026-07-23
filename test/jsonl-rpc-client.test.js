@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import { JsonlRpcClient } from "../src/jsonl-rpc-client.js";
 
 const FOUR_MIB = 4 * 1024 * 1024;
+const SIXTEEN_MIB = 16 * 1024 * 1024;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function readFrames(output) {
@@ -28,8 +29,23 @@ test("JsonlRpcClient extends EventEmitter and applies bounded defaults", () => {
   const rpc = new JsonlRpcClient({ input: new PassThrough(), output: new PassThrough() });
   assert.ok(rpc instanceof EventEmitter);
   assert.equal(rpc.timeoutMs, 15000);
-  assert.equal(rpc.maxFrameBytes, FOUR_MIB);
+  assert.equal(rpc.maxFrameBytes, SIXTEEN_MIB);
   assert.equal(rpc.maxQueuedBytes, FOUR_MIB);
+  rpc.close();
+});
+
+test("bounded defaults accept a five MiB App Server history frame", () => {
+  const input = new PassThrough();
+  const rpc = new JsonlRpcClient({ input, output: new PassThrough() });
+  const seen = [];
+  rpc.on("notification", (message) => seen.push(message));
+  input.write(`${JSON.stringify({
+    method: "thread/loaded",
+    params: { history: "x".repeat(5 * 1024 * 1024) },
+  })}\n`);
+  assert.equal(rpc.closed, false);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].params.history.length, 5 * 1024 * 1024);
   rpc.close();
 });
 

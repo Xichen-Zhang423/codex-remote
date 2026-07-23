@@ -93,11 +93,19 @@ class FakeAdapter extends EventEmitter {
     this.calls.push(["listThreads", params]);
     return { data: [{ id: "thr-current", name: "Current", cwd: this.cwd }], nextCursor: null };
   }
-  async readThread(id) {
-    this.calls.push(["readThread", id]);
-    return { thread: { id }, events: [{ type: "assistant", text: `history:${id}` }] };
+  async readThread(id, options) {
+    this.calls.push(["readThread", id, options]);
+    return {
+      thread: { id, cwd: this.cwd },
+      events: options?.includeTurns === false ? [] : [{ type: "assistant", text: `history:${id}` }],
+    };
   }
-  async resumeThread(id) { this.calls.push(["resumeThread", id]); this.threadId = id; return { thread: { id } }; }
+  async resumeThread(id, options) {
+    this.calls.push(["resumeThread", id, options]);
+    this.threadId = id;
+    if (options?.cwd) this.cwd = options.cwd;
+    return { thread: { id, cwd: this.cwd }, events: [{ type: "assistant", text: `history:${id}` }] };
+  }
   async newThread(value) { this.calls.push(["newThread", value]); this.threadId = "thr-new"; return { thread: { id: "thr-new" } }; }
   async renameThread(id, name) { this.calls.push(["renameThread", id, name]); }
   async archiveThread(id) { this.calls.push(["archiveThread", id]); }
@@ -680,6 +688,44 @@ test("replacing the active thread replaces the canonical reconnect history", asy
   } finally {
     first?.close();
     second?.close();
+    await remote.close();
+  }
+});
+
+test("loading a conversation adopts its stored workspace and reuses resume history", async () => {
+  const adapter = new FakeAdapter();
+  adapter.readThread = async (id, options) => {
+    adapter.calls.push(["readThread", id, options]);
+    return { thread: { id, cwd: "E:\\stored-workspace" }, events: [] };
+  };
+  adapter.resumeThread = async (id, options) => {
+    adapter.calls.push(["resumeThread", id, options]);
+    adapter.threadId = id;
+    adapter.cwd = options?.cwd ?? adapter.cwd;
+    return {
+      thread: { id, cwd: options?.cwd ?? adapter.cwd },
+      events: [{ type: "assistant", text: "history from resume" }],
+    };
+  };
+  const remote = await startTestServer({ adapter });
+  let ws;
+  try {
+    ws = await openPhone(remote);
+    for (let index = 0; index < 5; index += 1) await nextJson(ws);
+    ws.send(JSON.stringify({ type: "loadConversation", threadId: "thr-stored" }));
+    let history;
+    for (let index = 0; index < 4; index += 1) {
+      const message = await nextJson(ws);
+      if (message.type === "history") { history = message; break; }
+    }
+    assert.deepEqual(history?.events, [{ type: "assistant", text: "history from resume" }]);
+    assert.equal(adapter.cwd, "E:\\stored-workspace");
+    assert.deepEqual(adapter.calls.filter(([name]) => ["readThread", "resumeThread"].includes(name)), [
+      ["readThread", "thr-stored", { includeTurns: false }],
+      ["resumeThread", "thr-stored", { cwd: "E:\\stored-workspace" }],
+    ]);
+  } finally {
+    ws?.close();
     await remote.close();
   }
 });

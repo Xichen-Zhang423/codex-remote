@@ -310,10 +310,10 @@ export class CodexAdapter {
     };
   }
 
-  #threadResumeParams(threadId) {
+  #threadResumeParams(threadId, { cwd = this.cwd } = {}) {
     return {
       threadId,
-      cwd: this.cwd,
+      cwd,
       ...(this.model ? { model: this.model } : {}),
       approvalPolicy: "on-request",
       approvalsReviewer: "user",
@@ -321,12 +321,14 @@ export class CodexAdapter {
     };
   }
 
-  async resumeThread(threadId) {
+  async resumeThread(threadId, { cwd = this.cwd } = {}) {
     if (this.active) throw new Error("cannot resume a thread while a turn is active");
     const id = nonEmptyString(threadId, "threadId");
-    const response = await this.#request("thread/resume", this.#threadResumeParams(id));
+    const targetCwd = nonEmptyString(cwd, "cwd");
+    const response = await this.#request("thread/resume", this.#threadResumeParams(id, { cwd: targetCwd }));
+    this.setCwd(targetCwd);
     this.threadId = threadIdFrom(response, id);
-    return response;
+    return { ...response, events: historyEventsFromThread(response?.thread) };
   }
 
   async #recoverThread(threadId, connection) {
@@ -364,9 +366,10 @@ export class CodexAdapter {
     });
   }
 
-  async readThread(threadId) {
+  async readThread(threadId, { includeTurns = true } = {}) {
     const id = nonEmptyString(threadId, "threadId");
-    const response = await this.#request("thread/read", { threadId: id, includeTurns: true });
+    if (typeof includeTurns !== "boolean") throw new TypeError("includeTurns must be a boolean");
+    const response = await this.#request("thread/read", { threadId: id, includeTurns });
     return { ...response, events: historyEventsFromThread(response?.thread) };
   }
 

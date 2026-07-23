@@ -42,7 +42,7 @@ test("capture uses ffmpeg first, validates JPEG, and always removes the fresh fi
     const image = await remote.capture();
     assert.deepEqual(image, JPEG);
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].file, "ffmpeg.exe");
+    assert.equal(calls[0].file, remote.ffmpeg);
     assert.equal(calls[0].options.timeout, 15_000);
     assert.equal(fs.existsSync(path.join(dir, "codex-remote-capture-one.jpg")), false);
   } finally {
@@ -61,7 +61,7 @@ test("capture removes a partial ffmpeg file before PowerShell fallback", async (
       randomId: () => "capture-two",
       runFile: async (file, args) => {
         calls.push({ file, args });
-        if (file === "ffmpeg.exe") {
+        if (file === remote.ffmpeg) {
           const output = args.at(-1);
           fs.writeFileSync(output, "partial");
           throw new Error("ffmpeg failed");
@@ -77,14 +77,14 @@ test("capture removes a partial ffmpeg file before PowerShell fallback", async (
     });
     assert.deepEqual(await remote.capture(), JPEG);
     assert.deepEqual(calls.map(({ file }) => file), [
-      "ffmpeg.exe", "powershell.exe", "powershell.exe",
+      remote.ffmpeg, remote.powershell, remote.powershell,
     ]);
     const screenshot = calls[2].args;
     assert.equal(screenshot[screenshot.indexOf("-pw") + 1], "2560");
     assert.equal(screenshot[screenshot.indexOf("-ph") + 1], "1440");
     assert.deepEqual(await remote.capture(), JPEG);
     assert.deepEqual(calls.map(({ file }) => file), [
-      "ffmpeg.exe", "powershell.exe", "powershell.exe", "powershell.exe", "powershell.exe",
+      remote.ffmpeg, remote.powershell, remote.powershell, remote.powershell, remote.powershell,
     ]);
     assert.equal(fs.existsSync(path.join(dir, "codex-remote-capture-two.jpg")), false);
   } finally {

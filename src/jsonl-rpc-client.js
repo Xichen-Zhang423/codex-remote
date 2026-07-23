@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 
-const DEFAULT_LIMIT = 4 * 1024 * 1024;
+const DEFAULT_FRAME_LIMIT = 16 * 1024 * 1024;
+const DEFAULT_QUEUE_LIMIT = 4 * 1024 * 1024;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -67,8 +68,8 @@ export class JsonlRpcClient extends EventEmitter {
     input,
     output,
     timeoutMs = 15000,
-    maxFrameBytes = DEFAULT_LIMIT,
-    maxQueuedBytes = DEFAULT_LIMIT,
+    maxFrameBytes = DEFAULT_FRAME_LIMIT,
+    maxQueuedBytes = DEFAULT_QUEUE_LIMIT,
     writeTimeoutMs = 15000,
   }) {
     super();

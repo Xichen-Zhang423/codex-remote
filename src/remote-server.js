@@ -503,9 +503,12 @@ export class RemoteServer extends EventEmitter {
       }
       case "loadConversation": {
         const id = validateShortString(message.threadId, "threadId", { max: 500 });
-        const history = await this.adapter.readThread(id);
-        await this.adapter.resumeThread(id);
-        this.#replaceHistory(id, history.events ?? []);
+        const metadata = await this.adapter.readThread(id, { includeTurns: false });
+        const storedCwd = typeof metadata?.thread?.cwd === "string" && metadata.thread.cwd.trim()
+          ? metadata.thread.cwd
+          : this.adapter.cwd;
+        const resumed = await this.adapter.resumeThread(id, { cwd: storedCwd });
+        this.#replaceHistory(id, resumed.events ?? []);
         this.#broadcast({ type: "history", threadId: id, events: safeWire(this.history) });
         this.#broadcastSystemState();
         return;

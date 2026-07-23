@@ -167,6 +167,47 @@ test("maps thread, history, and model operations to pinned v2 methods", async ()
   assert.equal(adapter.effort, "medium");
 });
 
+test("resume adopts the selected thread cwd and reuses its returned history", async () => {
+  const rpc = makeRpc(async (method, params) => {
+    if (method !== "thread/resume") return {};
+    return {
+      thread: {
+        id: params.threadId,
+        cwd: params.cwd,
+        turns: [{
+          id: "turn-1",
+          status: "completed",
+          items: [
+            { type: "userMessage", id: "user-1", content: [{ type: "text", text: "old question" }] },
+            { type: "agentMessage", id: "agent-1", text: "old answer" },
+          ],
+        }],
+      },
+    };
+  });
+  const adapter = new CodexAdapter({ rpc, cwd: "D:\\current" });
+
+  const resumed = await adapter.resumeThread("thread-old", { cwd: "E:\\stored-workspace" });
+
+  assert.equal(adapter.cwd, "E:\\stored-workspace");
+  assert.equal(adapter.threadId, "thread-old");
+  assert.deepEqual(resumed.events, [
+    { type: "user_echo", text: "old question" },
+    { type: "assistant", text: "old answer" },
+    { type: "result", status: "completed" },
+  ]);
+  assert.deepEqual(rpc.calls, [[
+    "thread/resume",
+    {
+      threadId: "thread-old",
+      cwd: "E:\\stored-workspace",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write",
+    },
+  ]]);
+});
+
 test("starts a safe turn with text, local images, cwd, model, and effort", async () => {
   let cleaned = 0;
   const rpc = makeRpc(async (method) => {
