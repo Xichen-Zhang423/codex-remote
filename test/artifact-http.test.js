@@ -17,7 +17,8 @@ async function fixture(t, {
   setTimer = globalThis.setTimeout,
   clearTimer = globalThis.clearTimeout,
 } = {}) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-http-"));
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-http-"));
+  const directory = await fs.realpath(temporaryDirectory);
   const workspaceRealPath = path.join(directory, "workspace");
   await fs.mkdir(workspaceRealPath, { recursive: true });
   const actualStore = await ArtifactStore.open({ root: path.join(directory, "vault") });
@@ -52,7 +53,7 @@ async function fixture(t, {
       server.closeIdleConnections?.();
     });
     await actualStore.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
   });
 
   async function artifact(name, content) {

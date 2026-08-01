@@ -441,7 +441,8 @@ test("ingest rejects missing and unsafe workspace inputs", async (t) => {
   const linkPath = path.join(workspaceRealPath, "link.txt");
   try {
     await fs.symlink(sourcePath, linkPath, "file");
-    await assert.rejects(store.ingest({ ...valid, relativePath: "link.txt", sourcePath: linkPath }), /link|file|source/i);
+    const linked = await store.ingest({ ...valid, relativePath: "link.txt", sourcePath: linkPath });
+    assert.equal(linked.state, "blocked");
   } catch (error) {
     if (error.code !== "EPERM") throw error;
   }

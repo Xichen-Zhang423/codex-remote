@@ -118,12 +118,13 @@ async function closePhone(ws) {
 }
 
 async function artifactRoots() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cr-artifact-e2e-"));
+  const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cr-artifact-e2e-"));
+  const root = await fs.realpath(temporaryRoot);
   return {
     root,
     workspace: path.join(root, "workspace"),
     vault: path.join(root, "vault"),
-    cleanup: () => fs.rm(root, { recursive: true, force: true }),
+    cleanup: () => fs.rm(temporaryRoot, { recursive: true, force: true }),
   };
 }
 
