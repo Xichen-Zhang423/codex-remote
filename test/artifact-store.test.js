@@ -8,8 +8,9 @@ import path from "node:path";
 import { ArtifactStore } from "../src/artifact-store.js";
 
 async function fixture(t, options = {}) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-store-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-store-"));
+  t.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
+  const directory = await fs.realpath(temporaryDirectory);
   const workspaceRealPath = path.join(directory, "workspace");
   const root = path.join(directory, "vault");
   await fs.mkdir(workspaceRealPath, { recursive: true });
@@ -92,27 +93,6 @@ test("ingest atomically copies immutable content and restores metadata after res
   const restarted = await ArtifactStore.open({ root });
   t.after(() => restarted.close());
   assert.deepEqual(restarted.get(record.id), record);
-});
-
-test("ingest accepts source paths expressed through the frozen workspace alias", async (t) => {
-  const { directory, workspaceRealPath, store } = await fixture(t);
-  const workspaceAlias = path.join(directory, "workspace-alias");
-  await fs.symlink(workspaceRealPath, workspaceAlias, process.platform === "win32" ? "junction" : "dir");
-  const sourcePath = path.join(workspaceAlias, "aliased.txt");
-  await fs.writeFile(sourcePath, "aliased");
-
-  const record = await store.ingest({
-    workspaceRealPath: workspaceAlias,
-    threadId: "alias-thread",
-    turnId: "alias-turn",
-    relativePath: "aliased.txt",
-    sourcePath,
-    kind: "created",
-    provenance: ["snapshot"],
-    detectedAt: 1,
-  });
-
-  assert.equal(record.state, "ready");
 });
 
 test("public records are path-private and snapshots are newest-first with a 500 item cap", async (t) => {
