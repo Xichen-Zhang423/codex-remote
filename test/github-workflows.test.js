@@ -20,7 +20,7 @@ test("Windows CI performs clean and strict verification", () => {
 test("APK CI remains unsigned Debug-only", () => {
   const workflow = read("build-apk.yml");
   for (const pattern of [
-    /ubuntu-latest/, /node-version:\s*["']22["']/, /java-version:\s*["']17["']/,
+    /ubuntu-latest/, /node-version:\s*["']22["']/, /java-version:\s*["']21["']/,
     /android-actions\/setup-android@v3/, /npx cap add android/, /npx cap sync android/,
     /node scripts\/patch-android\.mjs/, /assembleDebug --no-daemon/,
     /app-android\/android\/app\/build\/outputs\/apk\/debug\/app-debug\.apk/,
