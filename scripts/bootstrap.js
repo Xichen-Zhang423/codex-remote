@@ -69,10 +69,13 @@ function copyRuntimeSource(sourceDir, targetDir) {
   const sourceLock = path.join(sourceDir, "package-lock.json");
   if (fs.existsSync(sourceLock)) copyWritableFile(sourceLock, path.join(targetDir, "package-lock.json"));
   for (const directory of CODE_DIRECTORIES) {
-    fs.cpSync(path.join(sourceDir, directory), path.join(targetDir, directory), {
-      recursive: true,
-      force: true,
-    });
+    const sourceDirectory = path.join(sourceDir, directory);
+    fs.mkdirSync(path.join(targetDir, directory), { recursive: true });
+    for (const nestedPath of walkFiles(sourceDirectory)) {
+      const targetPath = path.join(targetDir, directory, nestedPath);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      copyWritableFile(path.join(sourceDirectory, nestedPath), targetPath);
+    }
   }
 }
 
@@ -271,7 +274,10 @@ function installRuntime({ sourceDir, runtimeRoot, runtimeDir, appHome, hash, env
       restoreSourceLock(sourceDir, staging);
       fs.writeFileSync(path.join(staging, ".ready"), JSON.stringify({ hash, installedAt: new Date().toISOString() }));
       promoteRuntime(staging, runtimeDir, hash);
-      if (!runtimeReady(runtimeDir, hash)) throw new Error("Runtime installation failed its integrity check.");
+      if (!runtimeReady(runtimeDir, hash)) {
+        const actualHash = runtimeHash(runtimeDir);
+        throw new Error(`Runtime installation failed its integrity check (expected ${hash}, got ${actualHash}).`);
+      }
       return runtimeDir;
     } finally {
       if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: true });

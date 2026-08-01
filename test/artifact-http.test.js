@@ -11,7 +11,12 @@ import { createArtifactContentHandler, parseSingleRange } from "../src/artifact-
 import { ArtifactStore } from "../src/artifact-store.js";
 import { ArtifactTicketStore } from "../src/artifact-tickets.js";
 
-async function fixture(t, { now = Date.now, ttlMs = 60_000 } = {}) {
+async function fixture(t, {
+  now = Date.now,
+  ttlMs = 60_000,
+  setTimer = globalThis.setTimeout,
+  clearTimer = globalThis.clearTimeout,
+} = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "artifact-http-"));
   const workspaceRealPath = path.join(directory, "workspace");
   await fs.mkdir(workspaceRealPath, { recursive: true });
@@ -34,7 +39,7 @@ async function fixture(t, { now = Date.now, ttlMs = 60_000 } = {}) {
       };
     },
   };
-  const tickets = new ArtifactTicketStore({ now, ttlMs });
+  const tickets = new ArtifactTicketStore({ now, ttlMs, setTimer, clearTimer });
   const app = express();
   app.all("/artifacts/:artifactId/content", createArtifactContentHandler({ store, tickets }));
   const server = http.createServer(app);
@@ -144,7 +149,7 @@ test("returns 416 for malformed unsatisfiable and multi-range requests, includin
 
 test("rejects expired cross-artifact and stale-sha tickets and prevents cross-purpose elevation", async (t) => {
   let now = 1_000;
-  const fx = await fixture(t, { now: () => now, ttlMs: 10 });
+  const fx = await fixture(t, { now: () => now, ttlMs: 10, setTimer: () => null });
   const first = await fx.artifact("first.txt", "first");
   const second = await fx.artifact("second.txt", "second");
 

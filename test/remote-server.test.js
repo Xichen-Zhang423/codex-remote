@@ -876,7 +876,7 @@ test("browses and creates directories outside the current workspace for workspac
     ws.send(JSON.stringify({ type: "listDir", path: outside }));
     const outsideDirectory = await nextJson(ws);
     assert.equal(outsideDirectory.type, "directory");
-    assert.equal(outsideDirectory.path, fs.realpathSync(outside));
+    assert.equal(outsideDirectory.path, await fs.promises.realpath(outside));
     ws.send(JSON.stringify({ type: "mkdir", path: path.join(outside, "created") }));
     assert.equal((await nextJson(ws)).type, "directory");
     assert.equal(fs.existsSync(path.join(outside, "created")), true);

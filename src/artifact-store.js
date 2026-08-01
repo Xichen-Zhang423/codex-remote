@@ -999,7 +999,13 @@ export class ArtifactStore {
         if (error instanceof TypeError) throw error;
         throw new TypeError("workspaceRealPath must name a trusted directory", { cause: error });
       }
-      const sourcePath = path.resolve(sourceInput);
+      let sourcePath = path.resolve(sourceInput);
+      try {
+        const sourceParentRealPath = await fs.realpath(path.dirname(sourcePath));
+        sourcePath = path.join(sourceParentRealPath, path.basename(sourcePath));
+      } catch {
+        // Preserve missing-source handling below while canonicalizing existing parent aliases.
+      }
       const expectedSourcePath = path.resolve(workspaceRealPath, ...normalizedRelativePath.split("/"));
       if (!samePath(expectedSourcePath, sourcePath)) {
         throw new TypeError("sourcePath must match relativePath in the frozen workspace");

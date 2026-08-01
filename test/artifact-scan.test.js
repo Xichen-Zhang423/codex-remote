@@ -20,7 +20,7 @@ const {
 async function workspace(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-artifact-scan-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  return root;
+  return fs.realpath(root);
 }
 
 test("snapshotWorkspace returns bigint-safe signatures and partial coverage evidence", async (t) => {
