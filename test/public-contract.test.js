@@ -76,6 +76,15 @@ test("frontend handles the stable phone protocol and avoids untrusted innerHTML"
   assert.doesNotMatch(app, /\.innerHTML\s*=/);
 });
 
+test("workspace picker can leave the current folder and switch filesystem roots", () => {
+  const html = read("index.html");
+  const app = read("app.js");
+  assert.match(html, /id=["']directoryRootsBtn["']/);
+  assert.match(app, /type:\s*["']listRoots["']/);
+  assert.match(app, /case\s+["']directory_roots["']/);
+  assert.doesNotMatch(app, /state\.directoryPath\s*===\s*state\.directoryRoot/);
+});
+
 test("manifest and service worker provide a standalone offline shell", () => {
   const manifest = JSON.parse(read("manifest.webmanifest"));
   assert.equal(manifest.name, "Codex Remote");

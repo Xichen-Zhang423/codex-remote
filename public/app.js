@@ -42,7 +42,7 @@
     backendUrl: $("backendUrl"), saveBackendBtn: $("saveBackendBtn"), scanBtn: $("scanBtn"),
     reconnectBtn: $("reconnectBtn"), quickEditor: $("quickEditor"),
     saveQuickBtn: $("saveQuickBtn"), resetQuickBtn: $("resetQuickBtn"),
-    directoryUpBtn: $("directoryUpBtn"), directoryPath: $("directoryPath"),
+    directoryRootsBtn: $("directoryRootsBtn"), directoryUpBtn: $("directoryUpBtn"), directoryPath: $("directoryPath"),
     directoryList: $("directoryList"), mkdirName: $("mkdirName"), mkdirBtn: $("mkdirBtn"),
     useDirectoryBtn: $("useDirectoryBtn"), approvalSheet: $("approvalSheet"),
     approvalKind: $("approvalKind"), approvalTitle: $("approvalTitle"),
@@ -80,7 +80,6 @@
     appServerStatus: "online",
     conversations: [],
     models: [],
-    directoryRoot: null,
     directoryPath: null,
     approvals: [],
     approvalDrafts: new Map(),
@@ -959,6 +958,7 @@
         renderModels();
         break;
       case "directory": renderDirectory(message); break;
+      case "directory_roots": renderDirectoryRoots(message); break;
       case "permission_request": addApproval(message); break;
       case "permission_closed": closeApproval(message.id); break;
       case "permission_ack":
@@ -1274,11 +1274,13 @@
 
   function renderDirectory(message) {
     state.directoryPath = typeof message.path === "string" ? message.path : state.cwd;
-    if (!state.directoryRoot) state.directoryRoot = state.cwd;
     el.directoryPath.textContent = state.directoryPath || "—";
     el.directoryPath.title = state.directoryPath || "";
     const parent = parentPath(state.directoryPath);
-    el.directoryUpBtn.disabled = !parent || state.directoryPath === state.directoryRoot;
+    el.directoryUpBtn.disabled = !parent;
+    el.mkdirBtn.disabled = false;
+    el.mkdirName.disabled = false;
+    el.useDirectoryBtn.disabled = !state.directoryPath;
     el.directoryList.replaceChildren();
     const entries = Array.isArray(message.entries) ? [...message.entries] : [];
     entries.sort((a, b) => Number(Boolean(b.isDirectory)) - Number(Boolean(a.isDirectory)) || String(a.name).localeCompare(String(b.name), "zh-CN"));
@@ -1295,6 +1297,31 @@
       el.directoryList.appendChild(button);
     }
     if (!entries.length) el.directoryList.appendChild(create("div", "empty-list", "此目录为空"));
+  }
+
+  function renderDirectoryRoots(message) {
+    state.directoryPath = null;
+    el.directoryPath.textContent = "此电脑 / 选择磁盘";
+    el.directoryPath.title = "选择磁盘";
+    el.directoryUpBtn.disabled = true;
+    el.mkdirBtn.disabled = true;
+    el.mkdirName.disabled = true;
+    el.useDirectoryBtn.disabled = true;
+    el.directoryList.replaceChildren();
+    const roots = Array.isArray(message.roots) ? message.roots : [];
+    for (const root of roots) {
+      if (typeof root?.path !== "string") continue;
+      const button = create("button", "directory-entry");
+      button.type = "button";
+      append(button,
+        create("span", "entry-icon", "▣"),
+        create("span", "", root.name || root.path),
+        create("small", "", "DISK"),
+      );
+      button.addEventListener("click", () => sendWire({ type: "listDir", path: root.path }));
+      el.directoryList.appendChild(button);
+    }
+    if (!el.directoryList.childElementCount) el.directoryList.appendChild(create("div", "empty-list", "未找到可用磁盘"));
   }
 
   function captureApprovalDraft() {
@@ -1683,7 +1710,6 @@
 
   function openWorkspace() {
     if (!state.cwd) { toast("工作目录尚未同步", "error"); return; }
-    state.directoryRoot = state.cwd;
     state.directoryPath = state.cwd;
     openDrawer(el.workspaceDrawer);
     sendWire({ type: "listDir", path: state.cwd });
@@ -2102,6 +2128,7 @@
       renderQuick();
     });
 
+    el.directoryRootsBtn.addEventListener("click", () => sendWire({ type: "listRoots" }));
     el.directoryUpBtn.addEventListener("click", () => {
       const parent = parentPath(state.directoryPath);
       if (parent) sendWire({ type: "listDir", path: parent });

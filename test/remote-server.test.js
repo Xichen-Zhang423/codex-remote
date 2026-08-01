@@ -853,7 +853,7 @@ test("protects API state and serves static assets with security headers", async 
   }
 });
 
-test("confines directory browsing and creation to the current workspace", async () => {
+test("browses and creates directories outside the current workspace for workspace switching", async () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), "codex-remote-fs-"));
   const root = path.join(parent, "workspace");
   const outside = path.join(parent, "outside");
@@ -862,26 +862,60 @@ test("confines directory browsing and creation to the current workspace", async 
   fs.mkdirSync(path.join(root, "child"));
   const adapter = new FakeAdapter();
   adapter.cwd = root;
+  adapter.newThread = async (value) => {
+    adapter.calls.push(["newThread", value]);
+    adapter.cwd = value.cwd;
+    adapter.threadId = "thr-switched";
+    return { thread: { id: adapter.threadId, cwd: adapter.cwd } };
+  };
   const remote = await startTestServer({ adapter });
   let ws;
   try {
     ws = await openPhone(remote);
     for (let index = 0; index < 5; index += 1) await nextJson(ws);
     ws.send(JSON.stringify({ type: "listDir", path: outside }));
-    assert.match((await nextJson(ws)).message, /workspace/i);
-    ws.send(JSON.stringify({ type: "mkdir", path: path.join(outside, "blocked") }));
-    assert.match((await nextJson(ws)).message, /workspace/i);
-    assert.equal(fs.existsSync(path.join(outside, "blocked")), false);
+    const outsideDirectory = await nextJson(ws);
+    assert.equal(outsideDirectory.type, "directory");
+    assert.equal(outsideDirectory.path, fs.realpathSync(outside));
+    ws.send(JSON.stringify({ type: "mkdir", path: path.join(outside, "created") }));
+    assert.equal((await nextJson(ws)).type, "directory");
+    assert.equal(fs.existsSync(path.join(outside, "created")), true);
     ws.send(JSON.stringify({ type: "listDir", path: path.join(root, "child") }));
     const directory = await nextJson(ws);
     assert.equal(directory.type, "directory");
     ws.send(JSON.stringify({ type: "mkdir", path: path.join(root, "created") }));
     assert.equal((await nextJson(ws)).type, "directory");
     assert.equal(fs.existsSync(path.join(root, "created")), true);
+    ws.send(JSON.stringify({ type: "newConversation", cwd: outside }));
+    assert.equal((await nextJson(ws)).type, "history");
+    const switchedState = await nextJson(ws);
+    assert.equal(switchedState.type, "system_init");
+    assert.equal(switchedState.cwd, outside);
   } finally {
     ws?.close();
     await remote.close();
     fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test("lists filesystem roots for cross-drive workspace switching", async () => {
+  const remote = await startTestServer();
+  let ws;
+  try {
+    ws = await openPhone(remote);
+    for (let index = 0; index < 5; index += 1) await nextJson(ws);
+    ws.send(JSON.stringify({ type: "listRoots" }));
+    const roots = await nextJson(ws);
+    assert.equal(roots.type, "directory_roots");
+    assert.ok(Array.isArray(roots.roots));
+    assert.ok(roots.roots.length >= 1);
+    for (const root of roots.roots) {
+      assert.equal(typeof root.name, "string");
+      assert.equal(typeof root.path, "string");
+    }
+  } finally {
+    ws?.close();
+    await remote.close();
   }
 });
 

@@ -65,10 +65,21 @@ function cleanHistory(events, limit) {
     .slice(-limit);
 }
 
-function isWithin(root, target) {
-  const relative = path.relative(path.resolve(root), path.resolve(target));
-  return relative === "" || (relative !== ".."
-    && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+async function filesystemRoots() {
+  if (process.platform !== "win32") {
+    const root = path.parse(process.cwd()).root || path.sep;
+    return [{ name: root, path: root }];
+  }
+  const candidates = Array.from({ length: 26 }, (_, index) => `${String.fromCharCode(65 + index)}:\\`);
+  const roots = await Promise.all(candidates.map(async (candidate) => {
+    try {
+      const stat = await fs.promises.stat(candidate);
+      return stat.isDirectory() ? { name: candidate.slice(0, 2), path: candidate } : null;
+    } catch {
+      return null;
+    }
+  }));
+  return roots.filter(Boolean);
 }
 
 function tokenMatches(expected, actual) {
@@ -650,8 +661,11 @@ export class RemoteServer extends EventEmitter {
       case "listDir":
         await this.#listDirectory(client, message.path ?? this.adapter.cwd);
         return;
+      case "listRoots":
+        this.#send(client, { type: "directory_roots", roots: await filesystemRoots() }, true);
+        return;
       case "mkdir": {
-        const directory = await this.#workspacePath(
+        const directory = await this.#directoryPath(
           validateShortString(message.path, "path", { max: 32_768 }),
           { allowMissing: true },
         );
@@ -678,8 +692,7 @@ export class RemoteServer extends EventEmitter {
     }
   }
 
-  async #workspacePath(value, { allowMissing = false } = {}) {
-    const workspace = await fs.promises.realpath(this.adapter.cwd);
+  async #directoryPath(value, { allowMissing = false } = {}) {
     const requested = path.resolve(value);
     let resolved;
     if (allowMissing) {
@@ -688,13 +701,14 @@ export class RemoteServer extends EventEmitter {
     } else {
       resolved = await fs.promises.realpath(requested);
     }
-    if (!isWithin(workspace, resolved)) throw new Error("Path is outside the current workspace");
     return resolved;
   }
 
   async #listDirectory(client, directoryValue) {
     const requested = validateShortString(directoryValue, "path", { max: 32_768 });
-    const directory = await this.#workspacePath(requested);
+    const directory = await this.#directoryPath(requested);
+    const stat = await fs.promises.stat(directory);
+    if (!stat.isDirectory()) throw new Error("Path is not a directory");
     const entries = await fs.promises.readdir(directory, { withFileTypes: true });
     const limited = entries.slice(0, 500).map((entry) => ({
       name: entry.name,

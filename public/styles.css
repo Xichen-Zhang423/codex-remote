@@ -1529,7 +1529,7 @@ svg {
 
 .workspace-pathbar {
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: 44px 44px minmax(0, 1fr);
   align-items: center;
   gap: 5px;
   padding: 7px 10px;
