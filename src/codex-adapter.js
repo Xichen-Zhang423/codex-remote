@@ -15,6 +15,7 @@ const APPROVAL_METHODS = new Set([
 const DEFAULT_MAX_QUEUE = 20;
 const MAX_PROMPT_TEXT = 200_000;
 const MAX_EARLY_FILE_CHANGES = 1_000;
+const HISTORY_RPC_TIMEOUT_MS = 60_000;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_MAX_RESTART_DELAY_MS = 30_000;
 
@@ -325,7 +326,11 @@ export class CodexAdapter {
     if (this.active) throw new Error("cannot resume a thread while a turn is active");
     const id = nonEmptyString(threadId, "threadId");
     const targetCwd = nonEmptyString(cwd, "cwd");
-    const response = await this.#request("thread/resume", this.#threadResumeParams(id, { cwd: targetCwd }));
+    const response = await this.#request(
+      "thread/resume",
+      this.#threadResumeParams(id, { cwd: targetCwd }),
+      { timeoutMs: HISTORY_RPC_TIMEOUT_MS },
+    );
     this.setCwd(targetCwd);
     this.threadId = threadIdFrom(response, id);
     return { ...response, events: historyEventsFromThread(response?.thread) };
@@ -334,7 +339,11 @@ export class CodexAdapter {
   async #recoverThread(threadId, connection) {
     const id = nonEmptyString(threadId, "threadId");
     try {
-      const response = await connection.rpc.request("thread/resume", this.#threadResumeParams(id));
+      const response = await connection.rpc.request(
+        "thread/resume",
+        this.#threadResumeParams(id),
+        { timeoutMs: HISTORY_RPC_TIMEOUT_MS },
+      );
       this.#assertConnectionCurrent(connection);
       const restoredId = threadIdFrom(response, id);
       return { resumed: true, threadId: restoredId };
@@ -363,13 +372,17 @@ export class CodexAdapter {
       ...(cursor ? { cursor } : {}),
       limit,
       archived: archived === true,
-    });
+    }, { timeoutMs: HISTORY_RPC_TIMEOUT_MS });
   }
 
   async readThread(threadId, { includeTurns = true } = {}) {
     const id = nonEmptyString(threadId, "threadId");
     if (typeof includeTurns !== "boolean") throw new TypeError("includeTurns must be a boolean");
-    const response = await this.#request("thread/read", { threadId: id, includeTurns });
+    const response = await this.#request(
+      "thread/read",
+      { threadId: id, includeTurns },
+      { timeoutMs: HISTORY_RPC_TIMEOUT_MS },
+    );
     return { ...response, events: historyEventsFromThread(response?.thread) };
   }
 
@@ -854,8 +867,8 @@ export class CodexAdapter {
     }
   }
 
-  async #request(method, params) {
-    return this.#rpc().request(method, params);
+  async #request(method, params, options) {
+    return this.#rpc().request(method, params, options);
   }
 
   #rpc() {

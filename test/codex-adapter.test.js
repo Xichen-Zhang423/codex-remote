@@ -167,6 +167,34 @@ test("maps thread, history, and model operations to pinned v2 methods", async ()
   assert.equal(adapter.effort, "medium");
 });
 
+test("history RPCs use a longer timeout without relaxing interactive requests", async () => {
+  const calls = [];
+  const rpc = {
+    async request(method, params, options) {
+      calls.push([method, options]);
+      if (method === "thread/list") return { data: [], nextCursor: null };
+      if (method === "thread/read" || method === "thread/resume") {
+        return { thread: { id: params.threadId, cwd: params.cwd, turns: [] } };
+      }
+      if (method === "model/list") return { data: [], nextCursor: null };
+      return {};
+    },
+  };
+  const adapter = new CodexAdapter({ rpc, cwd: "D:\\repo" });
+
+  await adapter.listThreads();
+  await adapter.readThread("thread-old", { includeTurns: false });
+  await adapter.resumeThread("thread-old", { cwd: "D:\\stored" });
+  await adapter.listModels();
+
+  assert.deepEqual(calls, [
+    ["thread/list", { timeoutMs: 60_000 }],
+    ["thread/read", { timeoutMs: 60_000 }],
+    ["thread/resume", { timeoutMs: 60_000 }],
+    ["model/list", undefined],
+  ]);
+});
+
 test("resume adopts the selected thread cwd and reuses its returned history", async () => {
   const rpc = makeRpc(async (method, params) => {
     if (method !== "thread/resume") return {};
