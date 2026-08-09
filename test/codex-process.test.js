@@ -45,8 +45,30 @@ function createHarness(options = {}) {
     platform: options.platform || "linux",
     stopGraceMs: options.stopGraceMs,
     stopForceMs: options.stopForceMs,
+    setTimer: options.setTimer,
+    clearTimer: options.clearTimer,
   });
   return { manager, child: children[0], calls };
+}
+
+function manualTimers() {
+  const timers = [];
+  return {
+    timers,
+    setTimer(fn, delay) {
+      const timer = { fn, delay, cleared: false, ran: false, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer(timer) { if (timer) timer.cleared = true; },
+    runNext() {
+      const timer = timers.find((candidate) => !candidate.cleared && !candidate.ran);
+      if (!timer) throw new Error("no pending manual timer");
+      timer.ran = true;
+      timer.fn();
+      return timer;
+    },
+  };
 }
 
 async function finishInitialization(child, pending, result = { userAgent: "codex" }) {
@@ -300,25 +322,40 @@ test("stop settles only after the retired App Server child closes", async () => 
 });
 
 test("stop force-kills once and rejects if the child still never closes", async () => {
-  const { manager, child } = createHarness({ stopGraceMs: 5, stopForceMs: 5 });
+  const clock = manualTimers();
+  const { manager, child } = createHarness({
+    stopGraceMs: 5,
+    stopForceMs: 5,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
   await finishInitialization(child, manager.start());
 
   const stopping = manager.stop();
   assert.equal(typeof stopping?.then, "function");
+  assert.equal(clock.runNext().delay, 5);
+  assert.equal(child.killCalls, 2);
+  assert.equal(clock.runNext().delay, 5);
   await assert.rejects(stopping, (error) => error?.code === "APP_SERVER_STOP_TIMEOUT");
   assert.equal(child.killCalls, 2);
 });
 
 test("a stop timeout blocks every replacement until the retired child eventually closes", async () => {
+  const clock = manualTimers();
   const oldChild = new FakeChild();
   const newChild = new FakeChild();
   const { manager, calls } = createHarness({
     children: [oldChild, newChild],
     stopGraceMs: 5,
     stopForceMs: 5,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
   });
   await finishInitialization(oldChild, manager.start());
-  await assert.rejects(manager.stop(), (error) => error?.code === "APP_SERVER_STOP_TIMEOUT");
+  const stopping = manager.stop();
+  clock.runNext();
+  clock.runNext();
+  await assert.rejects(stopping, (error) => error?.code === "APP_SERVER_STOP_TIMEOUT");
 
   const blocked = manager.start();
   try {
