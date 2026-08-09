@@ -24,7 +24,8 @@ const defaultRunGit = (root, args) => execFileSync("git", ["-C", root, ...args],
 const REQUIRED_PATHS = [
   "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
   "package.json", "package-lock.json", "app-android/package.json", "app-android/package-lock.json",
-  "public/index.html", "public/panel.html", "public/manifest.webmanifest", "public/sw.js",
+  "public/index.html", "public/panel.html", "public/panel.js", "public/manifest.webmanifest", "public/sw.js",
+  "src/desktop-panel.js",
   ".github/workflows/build-apk.yml",
   ".github/workflows/verify.yml",
 ];
@@ -49,6 +50,44 @@ export function validateLockfile(root, manifestPath, lockPath) {
   for (const key of ["dependencies", "devDependencies"]) {
     if (semanticJson(rootPackage[key] ?? {}) !== semanticJson(manifest[key] ?? {}))
       errors.push(`${lockPath}: ${key} differ from ${manifestPath}`);
+  }
+  return sorted(errors);
+}
+
+const FORBIDDEN_DEPENDENCIES = ["qrcode-terminal"];
+const DEPENDENCY_SECTIONS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"];
+const isForbiddenSpec = (value, dependency) => typeof value === "string"
+  && (value === `npm:${dependency}` || value.startsWith(`npm:${dependency}@`));
+const referencesForbiddenDependency = (record, dependency) => Object.entries(record ?? {})
+  .some(([name, value]) => name === dependency || isForbiddenSpec(value, dependency));
+
+export function validateForbiddenDependencies(root, manifestPath = "package.json", lockPath = "package-lock.json") {
+  let manifest;
+  let lock;
+  try { manifest = parseJson(path.join(root, manifestPath)); }
+  catch { return []; }
+  try { lock = parseJson(path.join(root, lockPath)); }
+  catch { return []; }
+
+  const errors = [];
+  const rootPackage = lock.packages?.[""] ?? {};
+  for (const dependency of FORBIDDEN_DEPENDENCIES) {
+    if (DEPENDENCY_SECTIONS.some((section) => referencesForbiddenDependency(manifest[section], dependency)))
+      errors.push(`${manifestPath}: forbidden root dependency ${dependency}`);
+    if (DEPENDENCY_SECTIONS.some((section) => referencesForbiddenDependency(rootPackage[section], dependency)))
+      errors.push(`${lockPath}: forbidden root dependency ${dependency}`);
+
+    const packageSuffix = `/node_modules/${dependency}`;
+    const hasLockedPackage = Object.entries(lock.packages ?? {}).some(([entry, value]) => {
+      const normalized = entry.replaceAll("\\", "/");
+      return normalized === `node_modules/${dependency}`
+        || normalized.endsWith(packageSuffix)
+        || (entry !== "" && value?.name === dependency);
+    });
+    const hasLockedReference = Object.entries(lock.packages ?? {}).some(([entry, value]) =>
+      entry !== "" && DEPENDENCY_SECTIONS.some((section) => referencesForbiddenDependency(value?.[section], dependency)));
+    if (hasLockedPackage || hasLockedReference)
+      errors.push(`${lockPath}: forbidden transitive dependency ${dependency}`);
   }
   return sorted(errors);
 }
@@ -215,7 +254,7 @@ export function validateMarkdownLinks(root) {
 }
 
 const SHELL_ASSETS = [
-  "index.html", "panel.html", "styles.css", "app.js", "artifact-ui.js", "icon.svg",
+  "index.html", "panel.html", "panel.js", "styles.css", "app.js", "artifact-ui.js", "icon.svg",
   "manifest.webmanifest", "jsqr.min.js", "vendor/pdfjs/pdf.min.mjs", "vendor/pdfjs/pdf.worker.min.mjs",
 ];
 
@@ -485,6 +524,8 @@ export function verifyRelease(root, { allowDirty = false, includeHistory = false
     ["required paths", () => validateRequiredPaths(root)],
     ["root lockfile", () => validateLockfile(root, "package.json", "package-lock.json")],
     ["Android lockfile", () => validateLockfile(root, "app-android/package.json", "app-android/package-lock.json")],
+    ["root forbidden dependencies", () => validateForbiddenDependencies(root)],
+    ["Android forbidden dependencies", () => validateForbiddenDependencies(root, "app-android/package.json", "app-android/package-lock.json")],
     ["Markdown links", () => validateMarkdownLinks(root)],
     ["PWA shell", () => validatePwaShell(root)],
     ["runtime independence", () => validateRuntimeIndependence(root)],

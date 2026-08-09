@@ -6,11 +6,13 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  validateForbiddenDependencies,
   validateForbiddenFiles,
   validateGitHistory,
   validateLockfile,
   validateMarkdownLinks,
   validatePwaShell,
+  validateRequiredPaths,
   validateRuntimeIndependence,
   verifyRelease,
 } from "../scripts/release-verify.js";
@@ -45,6 +47,53 @@ test("lockfile dependency comparison ignores object key order", (t) => {
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify(manifest));
   fs.writeFileSync(path.join(root, "package-lock.json"), JSON.stringify(lock));
   assert.deepEqual(validateLockfile(root, "package.json", "package-lock.json"), []);
+});
+
+test("release requires both desktop panel runtime assets", (t) => {
+  const root = fixture(t);
+  const findings = validateRequiredPaths(root);
+  assert.ok(findings.includes("public/panel.js: required release path is missing"));
+  assert.ok(findings.includes("src/desktop-panel.js: required release path is missing"));
+});
+
+test("release rejects qrcode-terminal in the manifest and lockfile", (t) => {
+  const root = fixture(t);
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  manifest.dependencies["qrcode-terminal"] = "1.0.0";
+  const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
+  lock.packages[""].dependencies["qrcode-terminal"] = "1.0.0";
+  lock.packages["node_modules/qrcode-terminal"] = { version: "1.0.0" };
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify(manifest));
+  fs.writeFileSync(path.join(root, "package-lock.json"), JSON.stringify(lock));
+
+  const expected = [
+    "package-lock.json: forbidden root dependency qrcode-terminal",
+    "package-lock.json: forbidden transitive dependency qrcode-terminal",
+    "package.json: forbidden root dependency qrcode-terminal",
+  ];
+  const firstPass = validateForbiddenDependencies(root);
+  assert.deepEqual(firstPass, expected);
+  assert.deepEqual(validateForbiddenDependencies(root), firstPass);
+  assert.ok(verifyRelease(root, { allowDirty: true }).some((finding) => finding.includes("qrcode-terminal")));
+});
+
+test("release rejects npm aliases to qrcode-terminal", (t) => {
+  const root = fixture(t);
+  const alias = "terminal-qr";
+  const spec = "npm:qrcode-terminal@0.12.0";
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  manifest.dependencies[alias] = spec;
+  const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
+  lock.packages[""].dependencies[alias] = spec;
+  lock.packages[`node_modules/${alias}`] = { name: "qrcode-terminal", version: "0.12.0" };
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify(manifest));
+  fs.writeFileSync(path.join(root, "package-lock.json"), JSON.stringify(lock));
+
+  assert.deepEqual(validateForbiddenDependencies(root), [
+    "package-lock.json: forbidden root dependency qrcode-terminal",
+    "package-lock.json: forbidden transitive dependency qrcode-terminal",
+    "package.json: forbidden root dependency qrcode-terminal",
+  ]);
 });
 
 test("Markdown links reject missing files and root escape", (t) => {
@@ -137,6 +186,18 @@ test("PWA validator names a missing manifest icon", (t) => {
   fs.writeFileSync(path.join(root, "public", "manifest.webmanifest"), JSON.stringify({ name: "Codex Remote", short_name: "Codex Remote", start_url: ".", display: "standalone", theme_color: "#0b0d0c", icons: [{ src: "missing.png" }] }));
   fs.writeFileSync(path.join(root, "public", "sw.js"), "");
   assert.match(validatePwaShell(root).join("\n"), /public\/missing\.png/);
+});
+
+test("PWA validator requires the desktop panel module in the shell", (t) => {
+  const root = fixture(t);
+  fs.writeFileSync(path.join(root, "public", "manifest.webmanifest"), JSON.stringify({
+    name: "Codex Remote", short_name: "Codex Remote", start_url: ".", display: "standalone", theme_color: "#0b0d0c",
+  }));
+  fs.writeFileSync(path.join(root, "public", "sw.js"), [
+    "index.html", "panel.html", "styles.css", "app.js", "artifact-ui.js", "icon.svg",
+    "manifest.webmanifest", "jsqr.min.js", "vendor/pdfjs/pdf.min.mjs", "vendor/pdfjs/pdf.worker.min.mjs",
+  ].join("\n"));
+  assert.deepEqual(validatePwaShell(root), ["public/sw.js: shell does not cache panel.js"]);
 });
 
 test("PWA icons cannot traverse or name a directory", (t) => {

@@ -1,10 +1,80 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { isTunnelEnabled, main, selectPhoneBaseUrl } from "../server.js";
 
-test("selectPhoneBaseUrl prefers explicit public URL then a reachable LAN IPv4", () => {
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function privateLanInterfaces(address = "192.168.10.25") {
+  return {
+    Loopback: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+    WLAN: [{ address, family: "IPv4", internal: false }],
+  };
+}
+
+function unavailableLanInterfaces() {
+  return {
+    Loopback: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+    "vEthernet (WSL)": [{ address: "172.18.0.1", family: "IPv4", internal: false }],
+    Ethernet: [{ address: "203.0.113.25", family: "IPv4", internal: false }],
+  };
+}
+
+async function startPanelHarness({
+  platform = "linux",
+  env = {},
+  openPanelImpl = () => ({ opened: false }),
+} = {}) {
+  const logs = [];
+  const errors = [];
+  const app = await main({
+    env: {
+      CODEX_REMOTE_TUNNEL: "0",
+      ...env,
+    },
+    platform,
+    installSignalHandlers: false,
+    log: (line) => logs.push(String(line)),
+    error: (line) => errors.push(String(line)),
+    loadConfigImpl: () => ({
+      port: 9123,
+      token: "literal-phone-secret",
+      cwd: "/work",
+      model: null,
+      effort: null,
+      rendezvous: { url: "", secret: "", deviceId: "device-1" },
+    }),
+    createArtifactStore: async () => ({ async close() {} }),
+    createArtifactTracker: () => ({ async recoverPendingTurns() { return []; }, async close() {} }),
+    createArtifactTickets: () => ({ async close() {} }),
+    createCodexProcess: () => ({ packageBin: "C:\\runtime\\codex.js" }),
+    createAdapter: () => ({}),
+    createWindowsRemote: () => ({}),
+    createRemoteServerImpl: async () => ({
+      address: { port: 9123 },
+      httpUrl: "http://127.0.0.1:9123",
+      broadcast() {},
+      async close() {},
+    }),
+    createKeepAwake: () => null,
+    networkInterfacesImpl: () => privateLanInterfaces(),
+    checkCodexLoginStatusImpl: async () => "unknown",
+    openPanelImpl,
+  });
+  return { app, logs, errors };
+}
+
+test("selectPhoneBaseUrl ignores public overrides and selects only a reachable LAN IPv4", () => {
   const interfaces = {
     Loopback: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
     "vEthernet (WSL)": [
@@ -17,15 +87,30 @@ test("selectPhoneBaseUrl prefers explicit public URL then a reachable LAN IPv4",
   };
   assert.equal(selectPhoneBaseUrl({
     env: { CODEX_REMOTE_PUBLIC_URL: "https://remote.example/" }, port: 8766, interfaces,
-  }), "https://remote.example");
+  }), "http://192.168.10.25:8766");
   assert.equal(selectPhoneBaseUrl({ env: {}, port: 8766, interfaces }), "http://192.168.10.25:8766");
   assert.equal(selectPhoneBaseUrl({
     env: { CODEX_REMOTE_PUBLIC_HOST: "codex-pc.local" }, port: 9000, interfaces,
-  }), "http://codex-pc.local:9000");
+  }), "http://192.168.10.25:9000");
+  assert.equal(selectPhoneBaseUrl({
+    env: {
+      CODEX_REMOTE_PUBLIC_URL: "https://remote.example/",
+      CODEX_REMOTE_PUBLIC_HOST: "codex-pc.local",
+    },
+    port: 8766,
+    interfaces: unavailableLanInterfaces(),
+  }), null);
 });
 
-test("selectPhoneBaseUrl falls back to loopback when no LAN address exists", () => {
-  assert.equal(selectPhoneBaseUrl({ env: {}, port: 8766, interfaces: {} }), "http://127.0.0.1:8766");
+test("selectPhoneBaseUrl returns null when no reachable LAN address exists", () => {
+  assert.equal(selectPhoneBaseUrl({
+    env: {},
+    port: 8766,
+    interfaces: {
+      Loopback: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+      IPv6: [{ address: "fe80::1", family: "IPv6", internal: false }],
+    },
+  }), null);
 });
 
 test("selectPhoneBaseUrl ignores VPN tunnel adapters before choosing WLAN", () => {
@@ -38,6 +123,66 @@ test("selectPhoneBaseUrl ignores VPN tunnel adapters before choosing WLAN", () =
     selectPhoneBaseUrl({ env: {}, port: 8766, interfaces }),
     "http://10.38.7.142:8766",
   );
+});
+
+test("selectPhoneBaseUrl returns null when only virtual or VPN adapters are available", () => {
+  assert.equal(selectPhoneBaseUrl({
+    env: {},
+    port: 8766,
+    interfaces: {
+      "vEthernet (WSL)": [{ address: "172.18.0.1", family: "IPv4", internal: false }],
+      xray_tun: [{ address: "172.19.0.1", family: "IPv4", internal: false }],
+      Tailscale: [{ address: "100.104.123.11", family: "IPv4", internal: false }],
+    },
+  }), null);
+});
+
+test("selectPhoneBaseUrl does not expose an unencrypted fallback on a public IPv4", () => {
+  assert.equal(selectPhoneBaseUrl({
+    env: {},
+    port: 8766,
+    interfaces: {
+      Ethernet: [{ address: "203.0.113.25", family: "IPv4", internal: false }],
+    },
+  }), null);
+});
+
+test("main never promotes public URL or host configuration into LAN panel access", async () => {
+  let panelOptions;
+  const app = await main({
+    env: {
+      CODEX_REMOTE_TUNNEL: "0",
+      CODEX_REMOTE_PUBLIC_URL: "https://public.example",
+      CODEX_REMOTE_PUBLIC_HOST: "public-host.example",
+    },
+    platform: "linux",
+    installSignalHandlers: false,
+    log: () => {},
+    error: () => {},
+    loadConfigImpl: () => ({
+      port: 9123, token: "literal-phone-secret", cwd: "/work", model: null, effort: null,
+      rendezvous: { url: "", secret: "", deviceId: "device-1" },
+    }),
+    createArtifactStore: async () => ({ async close() {} }),
+    createArtifactTracker: () => ({ async recoverPendingTurns() { return []; }, async close() {} }),
+    createArtifactTickets: () => ({ async close() {} }),
+    createCodexProcess: () => ({ packageBin: "C:\\runtime\\codex.js" }),
+    createAdapter: () => ({}),
+    checkCodexLoginStatusImpl: async () => "unknown",
+    createPanelSessionImpl: (options) => {
+      panelOptions = options;
+      return { panelUrl: (baseUrl) => `${baseUrl}/panel.html#panel=test` };
+    },
+    createRemoteServerImpl: async () => ({
+      address: { port: 9123 }, httpUrl: "http://127.0.0.1:9123", broadcast() {}, async close() {},
+    }),
+    createKeepAwake: () => null,
+    networkInterfacesImpl: () => unavailableLanInterfaces(),
+  });
+
+  assert.equal(panelOptions.stateProvider().lanOrigin, null);
+  await assert.rejects(panelOptions.connectionProvider("lan"), { code: "LAN_CONNECTION_NOT_READY" });
+  await app.close();
 });
 
 test("isTunnelEnabled supports the dedicated switch and legacy NO_TUNNEL", () => {
@@ -121,6 +266,7 @@ test("main opens, recovers, wires, and closes artifact services in lifecycle ord
       return tracker;
     },
     createCodexProcess: () => ({}),
+    checkCodexLoginStatusImpl: async () => "unknown",
     createAdapter: (options) => {
       events.push("adapter:create");
       assert.equal(options.artifactTracker, tracker);
@@ -140,7 +286,7 @@ test("main opens, recovers, wires, and closes artifact services in lifecycle ord
       start() { events.push("awake:start"); return true; },
       stop() { events.push("awake:close"); return true; },
     }),
-    qrGenerate: (_url, _options, callback) => callback("[qr]"),
+    networkInterfacesImpl: () => unavailableLanInterfaces(),
   });
 
   assert.deepEqual(events.slice(0, 5), [
@@ -214,6 +360,7 @@ test("startup failures release acquired services in reverse order without double
           rendezvous: { url: "", secret: "", deviceId: "device-1" },
         }),
         createArtifactStore: async () => { events.push("store:open"); return store; },
+        checkCodexLoginStatusImpl: async () => "unknown",
         createArtifactTracker: () => {
           events.push("tracker:create");
           if (scenario.failAt === "tracker") throw new Error("tracker startup failed");
@@ -239,7 +386,6 @@ test("startup failures release acquired services in reverse order without double
           }
           throw new Error("remote startup failed");
         },
-        qrGenerate: (_url, _options, callback) => callback("[qr]"),
       };
       await assert.rejects(main(options), /startup failed/);
       assert.deepEqual(events, scenario.expected);
@@ -259,6 +405,7 @@ test("startup cleanup preserves the acquisition failure when cleanup also fails"
         rendezvous: { url: "", secret: "", deviceId: "device-1" },
       }),
       createArtifactStore: async () => ({ async close() { throw new Error("store cleanup failed"); } }),
+      checkCodexLoginStatusImpl: async () => "unknown",
       createArtifactTracker: () => { throw original; },
     });
   } catch (error) {
@@ -269,11 +416,222 @@ test("startup cleanup preserves the acquisition failure when cleanup also fails"
   assert.match(thrown.errors[1].message, /store cleanup failed/);
 });
 
-test("main wires Windows control and an owned tunnel, then closes in order", async () => {
+test("main opens one Windows desktop panel after HTTP startup and logs only safe public URLs", async () => {
   const lifecycle = [];
   const broadcasts = [];
   const logs = [];
-  const qrUrls = [];
+  const errors = [];
+  const opened = [];
+  let panelOptions;
+  let launcherOptions;
+  const env = {
+    CODEX_REMOTE_SOURCE_DIR: path.resolve("C:\\read only source"),
+    CODEX_REMOTE_CONFIG: path.resolve("C:\\user data\\CodexRemote\\config.json"),
+  };
+  const tunnel = new EventEmitter();
+  tunnel.start = () => lifecycle.push("tunnel-start");
+  tunnel.stop = async () => lifecycle.push("tunnel-stop");
+  const app = await main({
+    env,
+    platform: "win32",
+    installSignalHandlers: false,
+    log: (line) => logs.push(String(line)),
+    error: (line) => errors.push(String(line)),
+    loadConfigImpl: () => ({
+      port: 9123,
+      token: "literal-phone-secret",
+      cwd: "C:\\work",
+      model: null,
+      effort: null,
+      rendezvous: { url: "", secret: "", deviceId: "device-1" },
+    }),
+    createArtifactStore: async () => ({ async close() {} }),
+    createArtifactTracker: () => ({ async recoverPendingTurns() { return []; }, async close() {} }),
+    createArtifactTickets: () => ({ async close() {} }),
+    createCodexProcess: () => ({ packageBin: "C:\\runtime\\codex.js" }),
+    createAdapter: () => ({}),
+    createWindowsRemote: () => ({}),
+    createKeepAwake: () => null,
+    networkInterfacesImpl: () => privateLanInterfaces(),
+    checkCodexLoginStatusImpl: async () => "unknown",
+    createPanelSessionImpl: (options) => {
+      panelOptions = options;
+      return {
+        key: "panel-capability-key",
+        panelUrl: (baseUrl) => `${baseUrl}/panel.html#panel=panel-capability-key`,
+      };
+    },
+    createRemoteServerImpl: async () => {
+      lifecycle.push("remote-listening");
+      return {
+        address: { port: 9123 },
+        httpUrl: "http://127.0.0.1:9123",
+        broadcast: (event) => broadcasts.push(event),
+        async close() { lifecycle.push("remote-close"); },
+      };
+    },
+    createTunnel: () => tunnel,
+    openPanelImpl: (url, options) => {
+      lifecycle.push("panel-open");
+      assert.equal(panelOptions.stateProvider().lanOrigin, "http://192.168.10.25:9123");
+      opened.push(url);
+      launcherOptions = options;
+      return { opened: true };
+    },
+  });
+
+  assert.deepEqual(lifecycle, ["remote-listening", "panel-open", "tunnel-start"]);
+  assert.deepEqual(opened, ["http://127.0.0.1:9123/panel.html#panel=panel-capability-key"]);
+  assert.equal(launcherOptions.platform, "win32");
+  assert.equal(launcherOptions.env, env);
+  assert.equal(typeof launcherOptions.onError, "function");
+  assert.equal(logs.filter((line) => line === "Desktop control panel opened.").length, 1);
+  assert.doesNotMatch(logs.join("\n"), /literal-phone-secret|panel-capability-key|Phone base URL|LAN ONLY|Scan this QR code|[█▀▄]/u);
+
+  launcherOptions.onError(new Error(
+    "child failed for http://127.0.0.1:9123/panel.html#panel=panel-capability-key and panel-capability-key",
+  ));
+  assert.match(errors.at(-1), /^\[panel\] child failed/);
+  assert.doesNotMatch(errors.at(-1), /panel-capability-key/);
+
+  tunnel.emit("status", { state: "online", url: "https://public-a.example" });
+  assert.deepEqual(broadcasts.at(-1), {
+    type: "tunnel", state: "online", url: "https://public-a.example",
+  });
+  assert.equal(
+    await panelOptions.connectionProvider("remote"),
+    "https://public-a.example/?token=literal-phone-secret",
+  );
+  tunnel.emit("status", { state: "reconnecting", url: "https://public-a.example" });
+  await assert.rejects(panelOptions.connectionProvider("remote"), { code: "PUBLIC_CONNECTION_NOT_READY" });
+  tunnel.emit("status", { state: "online", url: "https://public-b.example" });
+  assert.equal(
+    await panelOptions.connectionProvider("remote"),
+    "https://public-b.example/?token=literal-phone-secret",
+  );
+  assert.deepEqual(logs.filter((line) => line.startsWith("Public remote URL:")), [
+    "Public remote URL: https://public-a.example",
+    "Public remote URL: https://public-b.example",
+  ]);
+  assert.doesNotMatch(logs.join("\n"), /literal-phone-secret|panel-capability-key|\?token=/);
+
+  tunnel.emit("status", {
+    state: "online",
+    url: "https://user:password@public-c.example/path/?token=literal-phone-secret#panel=panel-capability-key",
+  });
+  assert.equal(logs.at(-1), "Public remote URL: https://public-c.example/path");
+  assert.doesNotMatch(logs.join("\n"), /literal-phone-secret|panel-capability-key|user:password|\?token=/);
+
+  await app.close();
+  assert.deepEqual(lifecycle.slice(-2), ["tunnel-stop", "remote-close"]);
+});
+
+test("desktop panel auto-open respects platform and NO_PANEL true flags", async (t) => {
+  const scenarios = [
+    { name: "Windows default", platform: "win32", env: {}, expected: 1 },
+    { name: "non-Windows", platform: "linux", env: {}, expected: 0 },
+    ...["1", "true", "on", "yes"].map((value) => ({
+      name: `NO_PANEL=${value}`, platform: "win32", env: { NO_PANEL: value }, expected: 0,
+    })),
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      let calls = 0;
+      const { app } = await startPanelHarness({
+        platform: scenario.platform,
+        env: scenario.env,
+        openPanelImpl: () => { calls += 1; return { opened: false }; },
+      });
+      assert.equal(calls, scenario.expected);
+      await app.close();
+    });
+  }
+});
+
+test("desktop panel launcher failures are diagnostic and non-fatal", async (t) => {
+  await t.test("synchronous launcher failure", async () => {
+    const { app, logs, errors } = await startPanelHarness({
+      platform: "win32",
+      openPanelImpl: () => {
+        throw new Error("cannot launch #panel=secret-panel-key with literal-phone-secret");
+      },
+    });
+    assert.equal(logs.includes("Desktop control panel opened."), false);
+    assert.match(errors.join("\n"), /\[panel\].*cannot launch/);
+    assert.doesNotMatch(errors.join("\n"), /secret-panel-key|literal-phone-secret/);
+    await app.close();
+  });
+
+  await t.test("launcher declines to open", async () => {
+    const { app, logs } = await startPanelHarness({
+      platform: "win32",
+      openPanelImpl: () => ({ opened: false }),
+    });
+    assert.equal(logs.includes("Desktop control panel opened."), false);
+    await app.close();
+  });
+});
+
+test("post-listen URL initialization failures clean up every acquired service", async (t) => {
+  for (const scenario of [
+    {
+      name: "invalid remote port", platform: "linux", invalidPort: true,
+      env: {},
+    },
+    {
+      name: "panel URL construction", platform: "win32",
+      env: {}, panelThrows: true,
+    },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const events = [];
+      await assert.rejects(main({
+        env: { CODEX_REMOTE_TUNNEL: "0", ...scenario.env },
+        platform: scenario.platform,
+        installSignalHandlers: false,
+        log: () => {},
+        error: () => {},
+        loadConfigImpl: () => ({
+          port: 9123, token: "literal-phone-secret", cwd: "/work", model: null, effort: null,
+          rendezvous: { url: "", secret: "", deviceId: "device-1" },
+        }),
+        createArtifactStore: async () => ({ async close() { events.push("store-close"); } }),
+        checkCodexLoginStatusImpl: async () => "unknown",
+        createArtifactTracker: () => ({
+          async recoverPendingTurns() { return []; },
+          async close() { events.push("tracker-close"); },
+        }),
+        createArtifactTickets: () => ({ async close() { events.push("tickets-close"); } }),
+        createCodexProcess: () => ({ packageBin: "C:\\runtime\\codex.js" }),
+        createAdapter: () => ({ async stop() { events.push("adapter-stop"); } }),
+        createWindowsRemote: () => ({ async close() { events.push("windows-close"); } }),
+        createPanelSessionImpl: (options) => ({
+          ...options,
+          panelUrl() {
+            if (scenario.panelThrows) throw new Error("panel URL failed");
+            return "http://127.0.0.1:9123/panel.html#panel=test";
+          },
+        }),
+        createRemoteServerImpl: async () => ({
+          address: { port: scenario.invalidPort ? 0 : 9123 },
+          httpUrl: "http://127.0.0.1:9123", broadcast() {},
+          async close() { events.push("remote-close"); },
+        }),
+        networkInterfacesImpl: () => privateLanInterfaces(),
+        createKeepAwake: () => { throw new Error("keep-awake must not start before URL initialization"); },
+        openPanelImpl: () => { throw new Error("panel opener must not run after URL construction fails"); },
+      }), scenario.panelThrows ? /panel URL failed/ : /invalid phone port/);
+      assert.deepEqual(events, scenario.platform === "win32"
+        ? ["remote-close", "tickets-close", "windows-close", "adapter-stop", "tracker-close", "store-close"]
+        : ["remote-close", "tickets-close", "adapter-stop", "tracker-close", "store-close"]);
+    });
+  }
+});
+
+test("main wires Windows control and an owned tunnel, then closes in order", async (t) => {
+  const lifecycle = [];
+  const broadcasts = [];
+  const logs = [];
   const tunnel = new EventEmitter();
   tunnel.start = () => lifecycle.push("tunnel-start");
   tunnel.stop = async () => lifecycle.push("tunnel-stop");
@@ -296,7 +654,6 @@ test("main wires Windows control and an owned tunnel, then closes in order", asy
   const configFile = path.resolve("C:\\user data\\CodexRemote\\config.json");
   const app = await main({
     env: {
-      CODEX_REMOTE_PUBLIC_HOST: "codex-pc.local",
       CODEX_REMOTE_SOURCE_DIR: sourceDir,
       CODEX_REMOTE_CONFIG: configFile,
     },
@@ -308,6 +665,7 @@ test("main wires Windows control and an owned tunnel, then closes in order", asy
       assert.equal(options.file, configFile);
       return config;
     },
+    checkCodexLoginStatusImpl: async () => "unknown",
     createCodexProcess: () => ({ process: true }),
     createAdapter: () => ({ adapter: true }),
     createWindowsRemote: (options) => {
@@ -325,25 +683,137 @@ test("main wires Windows control and an owned tunnel, then closes in order", asy
       assert.equal(options.projectDir, sourceDir);
       return tunnel;
     },
-    qrGenerate: (url, _options, callback) => { qrUrls.push(url); callback("[qr]"); },
+    createKeepAwake: () => null,
+    networkInterfacesImpl: () => privateLanInterfaces(),
+    openPanelImpl: () => ({ opened: false }),
   });
+  t.after(() => app.close());
   assert.deepEqual(lifecycle, ["tunnel-start"]);
-  assert.equal(qrUrls[0], "http://codex-pc.local:9123/?token=literal-phone-secret&rz=https%3A%2F%2Frendezvous.example%2Fcurrent%3FdeviceId%3Ddevice-1");
   assert.equal(logs.join("\n").includes("literal-phone-secret"), false);
-  assert.equal(logs.some((message) => message.includes("[LAN ONLY / 仅局域网]")), true);
+  assert.doesNotMatch(logs.join("\n"), /Phone base URL|LAN ONLY|Scan this QR code|[█▀▄]/u);
 
   tunnel.emit("status", { state: "online", url: "https://bright-river.trycloudflare.com" });
   assert.deepEqual(broadcasts.at(-1), {
     type: "tunnel", state: "online", url: "https://bright-river.trycloudflare.com",
   });
-  assert.equal(qrUrls.at(-1), "https://bright-river.trycloudflare.com/?token=literal-phone-secret&rz=https%3A%2F%2Frendezvous.example%2Fcurrent%3FdeviceId%3Ddevice-1");
-  assert.equal(logs.some((message) => message.includes("[PUBLIC / 外网]")), true);
-  assert.equal(logs.some((message) => message.includes("VPN is not required")), true);
+  assert.equal(logs.at(-1), "Public remote URL: https://bright-river.trycloudflare.com");
 
   await app.close();
   assert.deepEqual(lifecycle, ["tunnel-start", "tunnel-stop", "remote-close"]);
   await app.close();
   assert.deepEqual(lifecycle, ["tunnel-start", "tunnel-stop", "remote-close"]);
+});
+
+test("main keeps public and LAN panel connection providers isolated across tunnel state changes", async () => {
+  let connectionProvider;
+  const tunnel = new EventEmitter();
+  tunnel.start = () => {};
+  tunnel.stop = async () => {};
+  const assertCode = (promise, code) => assert.rejects(promise, (error) => {
+    assert.equal(error.code, code);
+    return true;
+  });
+  const app = await main({
+    env: {},
+    log: () => {}, error: () => {}, platform: "linux", installSignalHandlers: false,
+    loadConfigImpl: () => ({
+      port: 9123, token: "literal-phone-secret", cwd: "/work", model: null, effort: null,
+      rendezvous: { url: "", secret: "", deviceId: "device-1" },
+    }),
+    createArtifactStore: async () => ({ async close() {} }),
+    createArtifactTracker: () => ({ async recoverPendingTurns() { return []; }, async close() {} }),
+    createArtifactTickets: () => ({ async close() {} }),
+    createCodexProcess: () => ({ packageBin: "C:\\runtime\\codex.js" }),
+    createAdapter: () => ({}),
+    checkCodexLoginStatusImpl: async () => "unknown",
+    createPanelSessionImpl: (options) => {
+      connectionProvider = options.connectionProvider;
+      return { panelUrl: (baseUrl) => `${baseUrl}/panel.html#panel=test` };
+    },
+    createRemoteServerImpl: async () => {
+      await assertCode(connectionProvider("remote"), "PUBLIC_CONNECTION_NOT_READY");
+      await assertCode(connectionProvider("lan"), "LAN_CONNECTION_NOT_READY");
+      return {
+        address: { port: 9123 }, httpUrl: "http://127.0.0.1:9123", broadcast() {}, async close() {},
+      };
+    },
+    createTunnel: () => tunnel,
+    createKeepAwake: () => null,
+    networkInterfacesImpl: () => privateLanInterfaces(),
+  });
+
+  await assertCode(connectionProvider("remote"), "PUBLIC_CONNECTION_NOT_READY");
+  assert.equal(
+    await connectionProvider("lan"),
+    "http://192.168.10.25:9123/?token=literal-phone-secret",
+  );
+
+  tunnel.emit("status", { state: "online", url: "https://public-a.example" });
+  assert.equal(
+    await connectionProvider("remote"),
+    "https://public-a.example/?token=literal-phone-secret",
+  );
+
+  tunnel.emit("status", { state: "reconnecting", url: "https://public-a.example" });
+  await assertCode(connectionProvider("remote"), "PUBLIC_CONNECTION_NOT_READY");
+  assert.equal(
+    await connectionProvider("lan"),
+    "http://192.168.10.25:9123/?token=literal-phone-secret",
+  );
+  await app.close();
+});
+
+test("close revokes public and LAN connections before awaiting tunnel shutdown and ignores late status", async () => {
+  let connectionProvider;
+  const broadcasts = [];
+  const stop = deferred();
+  const tunnel = new EventEmitter();
+  tunnel.start = () => {};
+  tunnel.stop = () => stop.promise;
+  const app = await main({
+    env: {},
+    log: () => {}, error: () => {}, platform: "linux", installSignalHandlers: false,
+    loadConfigImpl: () => ({
+      port: 9123, token: "literal-phone-secret", cwd: "/work", model: null, effort: null,
+      rendezvous: { url: "", secret: "", deviceId: "device-1" },
+    }),
+    createArtifactStore: async () => ({ async close() {} }),
+    createArtifactTracker: () => ({ async recoverPendingTurns() { return []; }, async close() {} }),
+    createArtifactTickets: () => ({ async close() {} }),
+    createCodexProcess: () => ({ packageBin: "C:\\runtime\\codex.js" }),
+    createAdapter: () => ({}),
+    checkCodexLoginStatusImpl: async () => "unknown",
+    createPanelSessionImpl: (options) => {
+      connectionProvider = options.connectionProvider;
+      return { panelUrl: (baseUrl) => `${baseUrl}/panel.html#panel=test` };
+    },
+    createRemoteServerImpl: async () => ({
+      address: { port: 9123 }, httpUrl: "http://127.0.0.1:9123",
+      broadcast: (event) => broadcasts.push(event), async close() {},
+    }),
+    createTunnel: () => tunnel,
+    createKeepAwake: () => null,
+    networkInterfacesImpl: () => privateLanInterfaces(),
+  });
+
+  tunnel.emit("status", { state: "online", url: "https://public-a.example" });
+  assert.equal(
+    await connectionProvider("remote"),
+    "https://public-a.example/?token=literal-phone-secret",
+  );
+  const closing = app.close();
+  await assert.rejects(connectionProvider("remote"), { code: "PUBLIC_CONNECTION_NOT_READY" });
+  await assert.rejects(connectionProvider("lan"), { code: "LAN_CONNECTION_NOT_READY" });
+  const broadcastsBeforeLateStatus = broadcasts.length;
+  tunnel.emit("status", { state: "online", url: "https://public-b.example" });
+  await assert.rejects(connectionProvider("remote"), { code: "PUBLIC_CONNECTION_NOT_READY" });
+  assert.equal(broadcasts.length, broadcastsBeforeLateStatus);
+
+  stop.resolve();
+  await closing;
+  tunnel.emit("status", { state: "online", url: "https://public-c.example" });
+  await assert.rejects(connectionProvider("remote"), { code: "PUBLIC_CONNECTION_NOT_READY" });
+  assert.equal(broadcasts.length, broadcastsBeforeLateStatus);
 });
 
 test("main keeps desktop and tunnel features disabled when unavailable", async () => {
@@ -359,6 +829,7 @@ test("main keeps desktop and tunnel features disabled when unavailable", async (
       port: 9123, token: "literal-phone-secret", cwd: "/work", model: null, effort: null,
       rendezvous: { url: "", secret: "", deviceId: "device-1" },
     }),
+    checkCodexLoginStatusImpl: async () => "unknown",
     createCodexProcess: () => ({}),
     createAdapter: () => ({}),
     createWindowsRemote: () => { throw new Error("must not create"); },
@@ -369,7 +840,7 @@ test("main keeps desktop and tunnel features disabled when unavailable", async (
       };
     },
     createTunnel: () => { tunnelCreated = true; },
-    qrGenerate: (_url, _options, callback) => callback("[qr]"),
+    networkInterfacesImpl: () => unavailableLanInterfaces(),
   });
   assert.equal(receivedWindowsRemote, null);
   assert.equal(tunnelCreated, false);
@@ -387,82 +858,29 @@ test("main still closes the HTTP service when owned tunnel cleanup fails", async
       port: 9123, token: "literal-phone-secret", cwd: "/work", model: null, effort: null,
       rendezvous: { url: "", secret: "", deviceId: "device-1" },
     }),
+    checkCodexLoginStatusImpl: async () => "unknown",
     createCodexProcess: () => ({}), createAdapter: () => ({}),
     createRemoteServerImpl: async () => ({
       address: { port: 9123 }, httpUrl: "http://127.0.0.1:9123", broadcast() {},
       close: async () => { remoteClosed = true; },
     }),
     createTunnel: () => tunnel,
-    qrGenerate: (_url, _options, callback) => callback("[qr]"),
+    networkInterfacesImpl: () => unavailableLanInterfaces(),
   });
   await assert.rejects(app.close(), /tunnel stop failed/);
   assert.equal(remoteClosed, true);
 });
 
-test("main keeps the real qrcode-terminal receiver when using the default generator", async () => {
-  const logs = [];
-  let remoteClosed = false;
-  const app = await main({
-    env: { NO_TUNNEL: "1", CODEX_REMOTE_PUBLIC_HOST: "phone.test" },
-    log: (message) => logs.push(String(message)),
-    error: () => {},
-    platform: "linux",
-    installSignalHandlers: false,
-    loadConfigImpl: () => ({
-      port: 8766,
-      token: "default-qr-token",
-      cwd: ".",
-      model: null,
-      effort: null,
-      rendezvous: { url: "", secret: "", deviceId: "device-test-01" },
-    }),
-    createCodexProcess: () => ({}),
-    createAdapter: () => ({}),
-    createRemoteServerImpl: async () => ({
-      httpUrl: "http://127.0.0.1:8766",
-      address: { port: 8766 },
-      close: async () => { remoteClosed = true; },
-    }),
-  });
+test("server source and package metadata contain no terminal QR implementation", () => {
+  const source = readFileSync(new URL("../server.js", import.meta.url), "utf8");
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
 
-  assert.equal(logs.some((message) => message.includes("Scan this QR code")), true);
-  assert.equal(logs.some((message) => /[█▀▄]/u.test(message)), true);
-  await app.close();
-  assert.equal(remoteClosed, true);
-});
-
-test("a QR rendering failure is reported without aborting the running service", async () => {
-  const errors = [];
-  let remoteClosed = false;
-  const app = await main({
-    env: { NO_TUNNEL: "1", CODEX_REMOTE_PUBLIC_HOST: "phone.test" },
-    log: () => {},
-    error: (message) => errors.push(String(message)),
-    platform: "linux",
-    installSignalHandlers: false,
-    loadConfigImpl: () => ({
-      port: 8766,
-      token: "secret-qr-token",
-      cwd: ".",
-      model: null,
-      effort: null,
-      rendezvous: { url: "", secret: "", deviceId: "device-test-01" },
-    }),
-    createCodexProcess: () => ({}),
-    createAdapter: () => ({}),
-    createRemoteServerImpl: async () => ({
-      httpUrl: "http://127.0.0.1:8766",
-      address: { port: 8766 },
-      close: async () => { remoteClosed = true; },
-    }),
-    qrGenerate: (url) => { throw new Error(`renderer unavailable: ${url}; secret-qr-token`); },
-  });
-
-  assert.match(errors.join("\n"), /\[qr\].*renderer unavailable/i);
-  assert.doesNotMatch(errors.join("\n"), /secret-qr-token/);
-  assert.doesNotMatch(errors.join("\n"), /\?token=/);
-  await app.close();
-  assert.equal(remoteClosed, true);
+  assert.equal(manifest.dependencies.qrcode, "^1.5.4");
+  assert.equal(manifest.dependencies["qrcode-terminal"], undefined);
+  assert.equal(lock.packages[""].dependencies["qrcode-terminal"], undefined);
+  assert.equal(lock.packages["node_modules/qrcode-terminal"], undefined);
+  assert.doesNotMatch(source, /qrcode-terminal|showPhoneAccess|qrGenerate|Scan this QR code/);
 });
 
 test("shutdown closes artifact tickets once and preserves aggregated cleanup failures", async () => {
@@ -491,7 +909,7 @@ test("shutdown closes artifact tickets once and preserves aggregated cleanup fai
       address: { port: 9123 }, httpUrl: "http://127.0.0.1:9123", broadcast() {},
       async close() { events.push("remote:close"); throw new Error("remote cleanup failed"); },
     }),
-    qrGenerate: (_url, _options, callback) => callback("[qr]"),
+    networkInterfacesImpl: () => unavailableLanInterfaces(),
   });
 
   let failure;
@@ -521,11 +939,11 @@ test("main wires a redacted live panel state, local fragment URL, and panel shut
     key: "panel-key",
     panelUrl: (base) => `${base}/panel.html#panel=panel-key`,
     state: () => panelOptions.stateProvider(),
-    createConnection: () => panelOptions.connectionProvider(),
+    createConnection: (mode = "remote") => panelOptions.connectionProvider(mode),
   };
   const app = await main({
     env: {
-      CODEX_REMOTE_TUNNEL: "0", CODEX_REMOTE_PUBLIC_HOST: "codex-pc.local",
+      CODEX_REMOTE_TUNNEL: "0",
       USERPROFILE: "C:\\Users\\Alice",
     },
     platform: "linux", installSignalHandlers: false,
@@ -550,12 +968,12 @@ test("main wires a redacted live panel state, local fragment URL, and panel shut
         async close() { remoteClosed += 1; },
       };
     },
-    qrGenerate: (_url, _options, callback) => callback("[qr]"),
+    networkInterfacesImpl: () => privateLanInterfaces(),
   });
 
   assert.equal(remoteOptions.panelSession, panelSession);
   assert.equal(typeof shutdownListener, "function");
-  assert.match(logs.join("\n"), /Desktop panel: http:\/\/127\.0\.0\.1:9123\/panel\.html#panel=panel-key/);
+  assert.doesNotMatch(logs.join("\n"), /panel-key|#panel=/);
   adapterOptions.onError(new Error("failed for literal-phone-secret at C:\\Users\\Alice\\private"));
   await new Promise((resolve) => setImmediate(resolve));
   const state = panelSession.state();
@@ -566,7 +984,7 @@ test("main wires a redacted live panel state, local fragment URL, and panel shut
   assert.equal(JSON.stringify(state).includes("C:\\Users\\Alice\\private"), false);
   assert.match(state.diagnostics.at(-1), /%USERPROFILE%/);
   assert.equal(errors.join("\n").includes("literal-phone-secret"), false);
-  assert.equal(await panelSession.createConnection(), "http://codex-pc.local:9123/?token=literal-phone-secret");
+  assert.equal(await panelSession.createConnection("lan"), "http://192.168.10.25:9123/?token=literal-phone-secret");
 
   shutdownListener();
   await app.close();

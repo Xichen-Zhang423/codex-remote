@@ -12,7 +12,7 @@
   <img src="docs/images/mobile-console.png" width="360" alt="Codex Remote 手机控制台，显示任务流和本轮产出" />
 </p>
 
-Codex Remote 是运行在你自己 Windows 电脑上的移动控制台。它连接本机官方 Codex CLI，不复制登录凭据，也不要求额外的 API key。手机端是一套为触控优化的 PWA：同一 Wi-Fi 可以直接扫描二维码，外出时可以通过可选的 Cloudflare 隧道连接。
+Codex Remote 是运行在你自己 Windows 电脑上的移动控制台。它连接本机官方 Codex CLI，不复制登录凭据，也不要求额外的 API key。手机端是一套为触控优化的 PWA：桌面控制台默认公网优先，同一 Wi-Fi 下也可按需生成局域网连接。
 
 与普通“终端网页”不同，它理解 Codex 的线程、回合、工具活动与批准请求；任务结束后，还会把期间检测到的新建或修改文件整理成可在手机上查看的**任务产出中心**。
 
@@ -40,7 +40,7 @@ Codex Remote is a self-hosted, mobile-first remote console for the local OpenAI 
 
 ## 📸 界面预览
 
-以下截图来自自动化 QA 固定场景，不包含真实账号、token、二维码、私人提示或工作文件。
+以下截图来自自动化 QA mock 固定场景，不包含真实账号、token、二维码、私人提示、工作文件或其他秘密。
 
 <table>
   <tr>
@@ -56,8 +56,8 @@ Codex Remote is a self-hosted, mobile-first remote console for the local OpenAI 
 </table>
 
 <p align="center">
-  <img src="docs/images/desktop-panel.png" width="960" alt="本机中继控制台，显示服务、Codex、局域网和隧道状态" />
-  <br /><strong>本机中继控制台</strong>：连接信息和诊断只在电脑本机显示。
+  <img src="docs/images/desktop-panel.png" width="960" alt="公网优先桌面控制台，局域网连接按需显示" />
+  <br /><strong>桌面控制台</strong>：公网连接居中显示，局域网入口只在需要时展开；连接信息和诊断只在电脑本机显示。
 </p>
 
 ## 🖥️ 五分钟开始
@@ -80,18 +80,21 @@ npx --yes --package @openai/codex@0.144.1 codex login status
 
 登录成功后，`start.bat` 会把仓库当作只读安装介质，根据内容哈希在 `%LOCALAPPDATA%\CodexRemote\runtime\<内容哈希>` 原子准备运行时，并把 npm 缓存放到 `%LOCALAPPDATA%\CodexRemote\npm-cache`。它不会在仓库里创建 `config.json` 或 `node_modules`。
 
-首次启动会在 `%LOCALAPPDATA%\CodexRemote\config.json` 生成本机专用的随机访问 token，默认端口为 `8766`。如果二维码渲染失败，服务仍会继续运行，本机控制台会保留可复制的连接入口。
+首次启动会在 `%LOCALAPPDATA%\CodexRemote\config.json` 生成本机专用的随机访问 token，默认端口为 `8766`。服务监听成功后自动打开桌面控制台。桌面控制台默认公网：公网隧道 ready 后才生成主二维码；如需同一 Wi-Fi 直连，展开“连接选项”并点击“显示局域网连接”，此时才会生成局域网二维码。仅展开连接选项不会创建连接。
+
+如果二维码渲染失败，服务仍会继续运行，桌面控制台会保留可复制的连接入口。关闭桌面控制台不会停止服务；继续使用手机遥控时，必须保持 `start.bat` 启动窗口和电脑开机、联网。
 
 `ffmpeg.exe` 和 `cloudflared.exe` 依次从独立仓库根目录、`%LOCALAPPDATA%\CodexRemote\bin` 和系统 `PATH` 查找，不依赖相邻项目或任何父目录文件。希望保持 Git 仓库纯净时，推荐把两个可执行文件放在用户本地 `bin` 目录。
 
 ## 📲 手机连接与安装
 
-1. 手机与电脑在同一局域网时，可以扫描启动窗口最先显示的局域网二维码。
-2. **准备离开电脑时，必须等待并扫描随后出现的 `Tunnel base URL` HTTPS 公网二维码。**它可以通过手机流量或其他 Wi-Fi 使用，不要求 VPN。
-3. 页面保存连接后会清理地址栏中的访问参数；仍不要转发原始二维码或连接链接。
-4. Android Chrome 选择“安装应用”或“添加到主屏幕”。
-5. iPhone / iPad 使用 Safari 分享菜单中的“添加到主屏幕”。
-6. 首次发送任务前确认工作目录；工具请求会显示批准面板。
+1. 启动后自动打开桌面控制台，默认公网；等待主卡显示公网隧道已就绪及公网二维码。
+2. **准备离开电脑时，先用手机流量或其他 Wi-Fi 扫描并实际打开公网二维码。**公网连接不要求 VPN。
+3. 只在同一 Wi-Fi 直连时，展开“连接选项”，再点击“显示局域网连接”并扫描局域网二维码。
+4. 页面保存连接后会清理地址栏中的访问参数；仍不要转发原始二维码或连接链接。
+5. Android Chrome 选择“安装应用”或“添加到主屏幕”。
+6. iPhone / iPad 使用 Safari 分享菜单中的“添加到主屏幕”。
+7. 首次发送任务前确认工作目录；工具请求会显示批准面板。
 
 完整图文流程见 [使用教程](./docs/使用教程.md)。
 
@@ -113,7 +116,7 @@ npx --yes --package @openai/codex@0.144.1 codex login status
 
 默认会尝试启动 Cloudflare Quick Tunnel，隧道域名可能随重启变化。把可信的 `cloudflared.exe` 放到 `%LOCALAPPDATA%\CodexRemote\bin`、仓库根目录，或确保 `cloudflared` 位于系统 `PATH`。服务运行期间会阻止 Windows 自动进入系统睡眠，但允许屏幕按电源设置熄灭；停止服务后该请求会自动释放。
 
-出门前请确认启动窗口已经显示 `Tunnel base URL: https://…trycloudflare.com`，用手机流量实际打开一次，再让电脑保持开机、联网并保持当前 Windows 用户登录。只有局域网二维码、电脑关机、休眠、断网或关闭启动窗口时，外网均无法连接。
+出门前请确认桌面控制台的公网隧道已就绪，用手机流量实际打开公网二维码，再让电脑保持开机、联网并保持当前 Windows 用户登录。只有局域网连接、电脑关机、休眠、断网或关闭 `start.bat` 启动窗口时，外网均无法连接。
 
 只使用局域网时：
 
@@ -121,6 +124,8 @@ npx --yes --package @openai/codex@0.144.1 codex login status
 $env:NO_TUNNEL="1"
 .\start.bat
 ```
+
+`NO_TUNNEL=1` 时仅提供局域网连接；在桌面控制台的“连接选项”中点击“显示局域网连接”后生成。若不希望 Windows 启动后自动打开桌面控制台，可使用 `NO_PANEL=1/true/on/yes`；它只禁用自动弹窗，Codex Remote 服务继续运行，关闭桌面控制台也不等于停止服务。移除 `NO_PANEL` 环境变量并重启后会恢复自动打开。无论面板是否打开，远程使用期间都要保持 `start.bat` 启动窗口和电脑运行。
 
 需要固定手机入口时，可以部署 [Cloudflare Worker 中转](./docs/远程连接与中转.md)。中转只保存当前隧道的基础 URL，不保存手机 token、Codex 登录信息、提示或聊天记录；它不是代理，也不是凭据保险箱。
 

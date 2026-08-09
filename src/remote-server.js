@@ -302,24 +302,68 @@ export class RemoteServer extends EventEmitter {
       if (!this.panelSession?.authorize(key)) return response.status(401).json({ error: "unauthorized" });
       return next();
     };
-    app.get("/api/panel/state", requirePanel, (_request, response) => response.json(this.panelSession.state()));
-    app.post("/api/panel/connection", requirePanel, async (_request, response) => {
-      try {
-        response.json(await this.panelSession.createConnection());
-      } catch (error) {
-        this.#report(error);
-        response.status(503).json({ error: "connection unavailable" });
+    const requireConnectionJson = (request, response, next) => {
+      const hasBody = Number(request.get("content-length") ?? 0) > 0
+        || Boolean(request.get("transfer-encoding"));
+      if (hasBody && !request.is("application/json")) {
+        return response.status(415).json({ error: "application/json required" });
       }
-    });
+      return next();
+    };
+    app.get("/api/panel/state", requirePanel, (_request, response) => response.json(this.panelSession.state()));
+    app.post(
+      "/api/panel/connection",
+      requirePanel,
+      requireConnectionJson,
+      express.json({ limit: "1kb" }),
+      async (request, response) => {
+        const body = request.body;
+        const mode = body === undefined || (body && !Array.isArray(body) && typeof body === "object" && !("mode" in body))
+          ? "remote"
+          : body?.mode;
+        if ((body !== undefined && (!body || Array.isArray(body) || typeof body !== "object"))
+            || (mode !== "remote" && mode !== "lan")) {
+          return response.status(400).json({
+            error: "invalid connection mode", code: "PANEL_CONNECTION_MODE",
+          });
+        }
+        try {
+          return response.json(await this.panelSession.createConnection(mode));
+        } catch (error) {
+          if (error?.code === "PANEL_CONNECTION_MODE") {
+            return response.status(400).json({
+              error: "invalid connection mode", code: "PANEL_CONNECTION_MODE",
+            });
+          }
+          if (error?.code === "PUBLIC_CONNECTION_NOT_READY") {
+            return response.status(503).json({
+              error: "public connection not ready", code: "PUBLIC_CONNECTION_NOT_READY",
+            });
+          }
+          if (error?.code === "LAN_CONNECTION_NOT_READY") {
+            return response.status(503).json({
+              error: "LAN connection not ready", code: "LAN_CONNECTION_NOT_READY",
+            });
+          }
+          this.#report(error);
+          return response.status(503).json({ error: "connection unavailable" });
+        }
+      },
+    );
     app.post("/api/panel/stop", requirePanel, express.json({ limit: "1kb" }), (request, response) => {
       if (request.body?.confirm !== "STOP") return response.status(400).json({ error: "confirmation required" });
       response.status(202).json({ ok: true });
       queueMicrotask(() => this.emit("shutdownRequested"));
     });
     app.use((error, _request, response, next) => {
-      if (error?.type !== "entity.parse.failed") return next(error);
       response.setHeader("Cache-Control", "no-store");
-      return response.status(400).json({ error: "invalid JSON" });
+      if (error?.type === "entity.parse.failed") {
+        return response.status(400).json({ error: "invalid JSON" });
+      }
+      if (error?.type === "entity.too.large") {
+        return response.status(413).json({ error: "request body too large" });
+      }
+      return next(error);
     });
     if (this.publicDir && fs.existsSync(this.publicDir)) {
       app.use(express.static(this.publicDir, { etag: true, fallthrough: true, index: "index.html" }));

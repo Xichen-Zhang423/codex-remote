@@ -51,8 +51,13 @@ export function createPanelSession({
           .slice(-20).map(sanitizeDiagnostic),
       };
     },
-    async createConnection() {
-      const copyUrl = String(await connectionProvider());
+    async createConnection(mode = "remote") {
+      if (mode !== "remote" && mode !== "lan") {
+        const error = new Error("invalid connection mode");
+        error.code = "PANEL_CONNECTION_MODE";
+        throw error;
+      }
+      const copyUrl = String(await connectionProvider(mode));
       const display = new URL(copyUrl);
       const secret = display.searchParams.get("token") || "";
       if (display.searchParams.has("token")) display.searchParams.set("token", "••••••");

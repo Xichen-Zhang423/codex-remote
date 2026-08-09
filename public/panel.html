@@ -11,33 +11,75 @@
   <link rel="icon" href="icons/icon-32.png" sizes="32x32" type="image/png">
   <link rel="apple-touch-icon" href="icons/icon-180.png" sizes="180x180">
   <link rel="stylesheet" href="styles.css">
-  <script src="panel.js" defer></script>
+  <script type="module" src="panel.js"></script>
 </head>
 <body class="panel-page">
   <main class="panel-shell" aria-labelledby="panelTitle">
-    <p class="eyebrow">DESKTOP RELAY / CODEX REMOTE</p>
-    <h1 id="panelTitle">本机中继控制台</h1>
-    <p id="panelStatus" class="panel-lede" role="status" aria-live="polite">正在验证本机面板权限…</p>
+    <header class="panel-hero">
+      <p class="eyebrow">DESKTOP RELAY / CODEX REMOTE</p>
+      <h1 id="panelTitle">本机中继控制台</h1>
+      <p id="panelStatus" class="panel-lede" role="status" aria-live="polite">正在验证本机面板权限…</p>
+    </header>
+
+    <section id="remoteConnection" class="remote-connection" aria-labelledby="remoteConnectionTitle" aria-busy="true" data-state="waiting">
+      <div class="connection-copy">
+        <div class="connection-heading">
+          <span class="connection-beacon" aria-hidden="true"></span>
+          <div>
+            <p class="eyebrow">PUBLIC ACCESS / PRIMARY</p>
+            <h2 id="remoteConnectionTitle">公网远程连接</h2>
+          </div>
+        </div>
+        <p id="remoteState" class="connection-state" role="status" aria-live="polite">正在建立安全公网隧道…</p>
+        <p id="remoteUrl" class="connection-url">等待公网地址</p>
+        <p id="remoteError" class="panel-error" role="alert"></p>
+        <div class="connection-actions">
+          <button id="copyRemoteConnection" class="primary" type="button" disabled>复制公网连接</button>
+          <button id="retryRemoteConnection" type="button">重试公网连接</button>
+        </div>
+      </div>
+      <figure class="qr-stage">
+        <img id="remoteQr" alt="公网远程连接二维码" hidden>
+        <figcaption>手机扫码进入安全会话</figcaption>
+      </figure>
+    </section>
 
     <section class="panel-grid" id="panelControls" aria-label="服务状态" hidden>
       <article><h2>服务</h2><p id="serviceStatus">—</p></article>
       <article><h2>Codex</h2><p id="codexStatus">—</p></article>
       <article><h2>工作目录</h2><p id="workspace">—</p></article>
-      <article><h2>局域网</h2><p id="lanOrigin">—</p></article>
       <article><h2>远程隧道</h2><p id="tunnelOrigin">—</p></article>
       <article><h2>可选工具</h2><p id="toolStatus">—</p></article>
     </section>
 
-    <section id="connectionPanel" class="panel-connection" hidden>
-      <div>
-        <p class="eyebrow">PHONE ACCESS</p>
-        <h2>手机连接</h2>
-        <p id="connectionUrl">—</p>
-        <p id="connectionError" class="panel-error" role="alert"></p>
-        <button id="copyConnection" type="button" disabled>复制连接地址</button>
+    <details id="connectionOptions" class="connection-options">
+      <summary id="connectionOptionsSummary">
+        <span>连接选项</span>
+        <small>局域网备用通道</small>
+      </summary>
+      <div class="connection-options-body">
+        <p>公网不可用时，可在同一局域网内生成一次性连接。展开选项不会自动创建凭据。</p>
+        <button id="showLanConnection" type="button">显示局域网连接</button>
+
+        <section id="lanConnection" class="lan-connection" aria-labelledby="lanConnectionTitle" aria-busy="false" tabindex="-1" hidden>
+          <div class="connection-copy">
+            <p class="eyebrow">LOCAL NETWORK / FALLBACK</p>
+            <h2 id="lanConnectionTitle">局域网连接</h2>
+            <p id="lanState" class="connection-state" role="status" aria-live="polite">等待局域网地址…</p>
+            <p id="lanUrl" class="connection-url">等待局域网地址</p>
+            <p id="lanError" class="panel-error" role="alert"></p>
+            <div class="connection-actions">
+              <button id="copyLanConnection" type="button" disabled>复制局域网连接</button>
+              <button id="hideLanConnection" type="button">隐藏局域网连接</button>
+            </div>
+          </div>
+          <figure class="qr-stage qr-stage-compact">
+            <img id="lanQr" alt="局域网连接二维码" hidden>
+            <figcaption>仅限受信任的本地网络</figcaption>
+          </figure>
+        </section>
       </div>
-      <img id="connectionQr" alt="手机连接二维码" hidden>
-    </section>
+    </details>
 
     <section class="panel-diagnostics" aria-labelledby="diagnosticsTitle">
       <p class="eyebrow">LOCAL DIAGNOSTICS</p>
@@ -45,8 +87,7 @@
       <ol id="diagnostics"><li>暂无诊断信息</li></ol>
     </section>
 
-    <div class="panel-actions" id="panelActions" hidden>
-      <button id="generateConnection" type="button">生成手机连接</button>
+    <div class="panel-actions" id="panelActions">
       <button id="refreshPanel" type="button">刷新状态</button>
       <button id="stopService" class="danger" type="button">安全停止服务</button>
     </div>

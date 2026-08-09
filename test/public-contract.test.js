@@ -44,7 +44,10 @@ test("status and error regions announce stable UI state", () => {
   assert.match(html, /id=["']settingsDrawer["'][^>]*class=["'][^"']*settings-drawer/);
   assert.match(html, /id=["']artifactStatus["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
   assert.match(panel, /id=["']panelStatus["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
-  assert.match(panel, /id=["']connectionError["'][^>]*role=["']alert["']/);
+  assert.match(panel, /id=["']remoteState["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
+  assert.match(panel, /id=["']remoteError["'][^>]*role=["']alert["']/);
+  assert.match(panel, /id=["']lanState["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
+  assert.match(panel, /id=["']lanError["'][^>]*role=["']alert["']/);
   assert.doesNotMatch(panel, /<meta[^>]+http-equiv=["']Content-Security-Policy["'][^>]+frame-ancestors/i);
 });
 
@@ -207,18 +210,49 @@ test("PDF preview generations own loading, rendering, and bounded canvases", () 
   assert.match(artifacts, /PDF 页面尺寸超出安全预览范围/);
 });
 
+test("desktop panel CSS makes public access primary and LAN progressive without narrow overflow", () => {
+  const css = read("styles.css");
+  assert.doesNotMatch(css, /var\(--bg\)/);
+  assert.match(css, /\.remote-connection\s*\{/);
+  assert.match(css, /\.lan-connection\s*\{/);
+  assert.match(css, /\.qr-stage[^}]*background:\s*(?:#fff|white)/s);
+  assert.match(css, /\.qr-stage[^}]*aspect-ratio:\s*1/s);
+  assert.match(css, /#copyRemoteConnection[^}]*min-height:\s*44px/s);
+  assert.match(css, /\.lan-connection:focus\s*,\s*\.lan-connection:focus-visible/);
+  assert.match(css, /@media\s*\(max-width:\s*720px\)/);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*no-preference\)/);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+});
+
 test("desktop panel requires an in-memory fragment capability", () => {
   const html = read("panel.html");
   const client = read("panel.js");
-  for (const id of ["panelStatus", "serviceStatus", "codexStatus", "workspace", "lanOrigin", "tunnelOrigin", "toolStatus", "diagnostics", "connectionPanel", "generateConnection", "copyConnection", "refreshPanel", "stopService"])
+  for (const id of [
+    "panelStatus", "serviceStatus", "codexStatus", "workspace", "tunnelOrigin", "toolStatus", "diagnostics",
+    "remoteConnection", "remoteState", "remoteUrl", "remoteQr", "copyRemoteConnection", "retryRemoteConnection",
+    "connectionOptions", "connectionOptionsSummary", "showLanConnection", "lanConnection", "lanState", "lanUrl", "lanQr",
+    "copyLanConnection", "hideLanConnection", "refreshPanel", "stopService",
+  ])
     assert.match(html, new RegExp(`id=["']${id}["']`));
+  assert.match(html, /<script[^>]*type=["']module["'][^>]*src=["']panel\.js["']/i);
+  assert.match(html, /id=["']remoteConnection["'][^>]*aria-labelledby=["']remoteConnectionTitle["'][^>]*aria-busy=["']true["']/);
+  assert.doesNotMatch(html, /id=["']remoteConnection["'][^>]*\shidden(?:\s|>)/);
+  assert.match(html, /id=["']remoteConnectionTitle["'][^>]*>\s*公网远程连接\s*</);
+  assert.match(html, /id=["']remoteState["'][^>]*>\s*正在建立安全公网隧道…\s*</);
+  assert.match(html, /<details[^>]*id=["']connectionOptions["']/);
+  assert.match(html, /<section[^>]*id=["']lanConnection["'][^>]*\shidden(?:\s|>)/);
+  assert.match(html, /id=["']remoteQr["'][^>]*alt=["'][^"']*公网[^"']*二维码[^"']*["']/);
+  assert.match(html, /id=["']lanQr["'][^>]*alt=["'][^"']*局域网[^"']*二维码[^"']*["']/);
+  assert.doesNotMatch(html, /id=["']lanOrigin["']|id=["']generateConnection["']|id=["']connectionPanel["']/);
   assert.match(client, /location\.hash/);
   assert.match(client, /history\.replaceState/);
   assert.match(client, /X-Codex-Panel-Key/);
+  assert.match(client, /export function createPanelController/);
+  assert.match(client, /JSON\.stringify\(\{ mode \}\)/);
   assert.match(client, /textContent/);
   assert.match(client, /window\.confirm/);
   assert.doesNotMatch(client, /innerHTML|localStorage|sessionStorage/);
   assert.doesNotMatch(html + client, /<iframe|https:\/\/[^"']+(?:\.js|\.css)|\?token=[^"']+/i);
-  assert.doesNotMatch(client, /fetch\(["']\/api\/panel\/connection["']\)[\s\S]*DOMContentLoaded/);
+  assert.doesNotMatch(client, /generateConnection/);
   assert.doesNotMatch(html + client, /鎵嬫満宸ヤ綔鍙|鏈満涓户|涓户鎺у埗/);
 });

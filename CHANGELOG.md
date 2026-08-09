@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+- Added an auto-opening Windows desktop console with a public-first QR and an on-demand LAN connection under connection options.
+
+### Changed
+- Documented that `NO_PANEL=1/true/on/yes` disables only the automatic panel window while the service continues, and that `NO_TUNNEL=1` provides LAN-only access.
+
 ### Fixed
 - Hardened Codex App Server startup with an initialize-specific timeout, one clean retry after confirmed process shutdown, and bounded redacted diagnostics for transient stalls.
 

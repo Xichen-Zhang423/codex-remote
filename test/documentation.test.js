@@ -33,6 +33,30 @@ test("README is a standalone GitHub introduction and first-run journey", () => {
   assert.equal(readme.includes("\uFFFD"), false);
 });
 
+test("README and usage guide describe the public-first desktop console", () => {
+  const readme = read("README.md");
+  const guide = read("docs/使用教程.md");
+
+  for (const [name, document] of [["README", readme], ["usage guide", guide]]) {
+    for (const phrase of [
+      "启动后自动打开桌面控制台",
+      "默认公网",
+      "显示局域网连接",
+      "NO_PANEL=1/true/on/yes",
+      "服务继续运行",
+    ]) assert.ok(document.includes(phrase), `${name}: ${phrase}`);
+    assert.match(document, /公网隧道[\s\S]{0,100}(?:就绪|ready)[\s\S]{0,100}(?:主二维码|公网二维码)/i);
+    assert.match(document, /NO_TUNNEL[\s\S]{0,100}(?:仅|只)[\s\S]{0,30}局域网/);
+    assert.match(document, /关闭[\s\S]{0,30}桌面控制台[\s\S]{0,40}(?:不会|不等于)[\s\S]{0,20}停止服务/);
+    assert.match(document, /(?:移除|删除)[\s\S]{0,30}NO_PANEL[\s\S]{0,40}重启[\s\S]{0,40}自动打开/);
+    assert.doesNotMatch(document, /终端二维码|第一、第二二维码|第一个二维码|第二个二维码|启动窗口[^\n。]*二维码/);
+    assert.doesNotMatch(document, /手(?:工|动)打开[^\n。]*(?:panel|面板)[^\n。]*(?:URL|地址)/i);
+  }
+
+  assert.match(readme, /alt="[^"]*公网优先[^"]*局域网[^"]*按需[^"]*"/);
+  assert.match(readme, /自动化[^\n]*(?:mock|固定场景)[^\n]*不包含真实[^\n]*(?:token|秘密)/i);
+});
+
 test("README states security approval artifact and platform boundaries", () => {
   const readme = read("README.md");
   assert.match(readme, /官方 Codex CLI[\s\S]*登录[\s\S]*不复制[\s\S]*认证/);
@@ -72,6 +96,14 @@ test("platform and connection guides retain their exact delivery boundaries", ()
   assert.match(harmony, /resource:\/\/[\s\S]*外部导航[\s\S]*相机/);
   assert.doesNotMatch(harmony, /提交.*(?:证书|私钥)/);
   assert.match(remote, /只(?:保存|包含)[\s\S]*基础 URL[\s\S]*不(?:保存|发布)[\s\S]*token[\s\S]*(?:Codex 登录|提示|聊天)/);
+});
+
+test("remote connection guide uses the public-first desktop console", () => {
+  const remote = read("docs/远程连接与中转.md");
+  assert.match(remote, /启动后自动打开桌面控制台/);
+  assert.match(remote, /默认公网[\s\S]{0,100}公网隧道[\s\S]{0,50}(?:ready|就绪)[\s\S]{0,80}公网二维码/i);
+  assert.match(remote, /连接选项[\s\S]{0,80}显示局域网连接[\s\S]{0,80}(?:按需|局域网二维码)/);
+  assert.doesNotMatch(remote, /终端二维码|等待终端[^\n。]*隧道基础 URL|扫描终端[^\n。]*二维码/);
 });
 
 test("usage guide covers binary resolution QR fallback and artifact recovery", () => {

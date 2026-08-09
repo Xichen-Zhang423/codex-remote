@@ -135,6 +135,7 @@ async function startTestServer(options = {}) {
     artifactTracker: options.artifactTracker,
     artifactTickets: options.artifactTickets,
     ownAdapter: true,
+    onError: options.onError,
   });
   return { ...remote, adapter };
 }
@@ -215,6 +216,182 @@ test("panel routes require their own capability and emit one confirmed shutdown"
     assert.equal(shutdownCount, 1);
   } finally {
     remote.off("shutdownRequested", onShutdown);
+    await remote.close();
+  }
+});
+
+test("panel connection authenticates before bounded JSON parsing and validates modes before provider calls", async () => {
+  const connectionModes = [];
+  const connection = {
+    displayUrl: "https://remote.invalid/connect", copyUrl: "https://remote.invalid/connect",
+    qrDataUrl: null, qrError: null, expiresAt: 301_000,
+  };
+  const panelSession = {
+    authorize: (value) => value === "panel-key",
+    state: () => ({}),
+    async createConnection(mode) { connectionModes.push(mode); return connection; },
+  };
+  const remote = await startTestServer({ panelSession });
+  const authorized = { "X-Codex-Panel-Key": "panel-key" };
+  const postJson = (value, headers = authorized) => fetch(`${remote.httpUrl}/api/panel/connection`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: typeof value === "string" ? value : JSON.stringify(value),
+  });
+  try {
+    const malformedUnauthorized = await postJson("{malformed", {});
+    assert.equal(malformedUnauthorized.status, 401);
+    assert.deepEqual(await malformedUnauthorized.json(), { error: "unauthorized" });
+    assert.equal(connectionModes.length, 0);
+
+    const noBody = await fetch(`${remote.httpUrl}/api/panel/connection`, {
+      method: "POST", headers: authorized,
+    });
+    assert.equal(noBody.status, 200);
+    assert.deepEqual(await noBody.json(), connection);
+
+    const emptyObject = await postJson({});
+    assert.equal(emptyObject.status, 200);
+    assert.deepEqual(await emptyObject.json(), connection);
+
+    const lan = await postJson({ mode: "lan" });
+    assert.equal(lan.status, 200);
+    assert.deepEqual(await lan.json(), connection);
+    assert.deepEqual(connectionModes, ["remote", "remote", "lan"]);
+
+    const malformedAuthorized = await postJson("{malformed");
+    assert.equal(malformedAuthorized.status, 400);
+    assert.deepEqual(await malformedAuthorized.json(), { error: "invalid JSON" });
+    assert.equal(connectionModes.length, 3);
+
+    for (const body of [
+      { mode: null }, { mode: "REMOTE" }, { mode: " lan" }, { mode: "lan " }, { mode: {} }, [],
+    ]) {
+      const response = await postJson(body);
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        error: "invalid connection mode", code: "PANEL_CONNECTION_MODE",
+      });
+      assert.equal(connectionModes.length, 3);
+    }
+
+    const oversized = await postJson({ padding: "x".repeat(1_100) });
+    assert.equal(oversized.status, 413);
+    assert.match(oversized.headers.get("content-type"), /^application\/json/);
+    assert.deepEqual(await oversized.json(), { error: "request body too large" });
+    assert.equal(connectionModes.length, 3);
+  } finally {
+    await remote.close();
+  }
+});
+
+test("panel connection rejects non-empty non-JSON media without invoking the provider", async () => {
+  const connectionModes = [];
+  const connection = {
+    displayUrl: "https://remote.invalid/connect", copyUrl: "https://remote.invalid/connect",
+    qrDataUrl: null, qrError: null, expiresAt: 301_000,
+  };
+  const panelSession = {
+    authorize: (value) => value === "panel-key",
+    state: () => ({}),
+    async createConnection(mode) { connectionModes.push(mode); return connection; },
+  };
+  const remote = await startTestServer({ panelSession });
+  const panelHeaders = { "X-Codex-Panel-Key": "panel-key" };
+  try {
+    const unauthorized = await fetch(`${remote.httpUrl}/api/panel/connection`, {
+      method: "POST", headers: { "content-type": "text/plain" }, body: "not json",
+    });
+    assert.equal(unauthorized.status, 401);
+    assert.deepEqual(await unauthorized.json(), { error: "unauthorized" });
+    assert.equal(connectionModes.length, 0);
+
+    const text = await fetch(`${remote.httpUrl}/api/panel/connection`, {
+      method: "POST",
+      headers: { ...panelHeaders, "content-type": "text/plain" },
+      body: "not json",
+    });
+    assert.equal(text.status, 415);
+    assert.deepEqual(await text.json(), { error: "application/json required" });
+    assert.equal(connectionModes.length, 0);
+
+    const chunked = await new Promise((resolve, reject) => {
+      const request = http.request(`${remote.httpUrl}/api/panel/connection`, {
+        method: "POST",
+        headers: { ...panelHeaders, "content-type": "application/octet-stream" },
+      }, (response) => {
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => { body += chunk; });
+        response.on("end", () => resolve({ status: response.statusCode, body: JSON.parse(body) }));
+      });
+      request.on("error", reject);
+      request.write(Buffer.from([0, 1, 2, 3]));
+      request.end();
+    });
+    assert.equal(chunked.status, 415);
+    assert.deepEqual(chunked.body, { error: "application/json required" });
+    assert.equal(connectionModes.length, 0);
+
+    const legacy = await fetch(`${remote.httpUrl}/api/panel/connection`, {
+      method: "POST", headers: panelHeaders,
+    });
+    assert.equal(legacy.status, 200);
+    assert.deepEqual(await legacy.json(), connection);
+    assert.deepEqual(connectionModes, ["remote"]);
+  } finally {
+    await remote.close();
+  }
+});
+
+test("panel connection maps expected availability errors without reporting them", async () => {
+  const reported = [];
+  const connectionModes = [];
+  let providerError;
+  const panelSession = {
+    authorize: (value) => value === "panel-key",
+    state: () => ({}),
+    async createConnection(mode) {
+      connectionModes.push(mode);
+      throw providerError;
+    },
+  };
+  const remote = await startTestServer({ panelSession, onError: (error) => reported.push(error) });
+  const request = (mode) => fetch(`${remote.httpUrl}/api/panel/connection`, {
+    method: "POST",
+    headers: { "X-Codex-Panel-Key": "panel-key", "content-type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  try {
+    const expected = [
+      {
+        mode: "remote", code: "PANEL_CONNECTION_MODE", status: 400,
+        body: { error: "invalid connection mode", code: "PANEL_CONNECTION_MODE" },
+      },
+      {
+        mode: "remote", code: "PUBLIC_CONNECTION_NOT_READY", status: 503,
+        body: { error: "public connection not ready", code: "PUBLIC_CONNECTION_NOT_READY" },
+      },
+      {
+        mode: "lan", code: "LAN_CONNECTION_NOT_READY", status: 503,
+        body: { error: "LAN connection not ready", code: "LAN_CONNECTION_NOT_READY" },
+      },
+    ];
+    for (const testCase of expected) {
+      providerError = Object.assign(new Error(`private ${testCase.code} detail`), { code: testCase.code });
+      const response = await request(testCase.mode);
+      assert.equal(response.status, testCase.status);
+      assert.deepEqual(await response.json(), testCase.body);
+      assert.equal(reported.length, 0);
+    }
+
+    providerError = new Error("private provider failure");
+    const unavailable = await request("remote");
+    assert.equal(unavailable.status, 503);
+    assert.deepEqual(await unavailable.json(), { error: "connection unavailable" });
+    assert.deepEqual(reported, [providerError]);
+    assert.deepEqual(connectionModes, ["remote", "remote", "lan", "remote"]);
+  } finally {
     await remote.close();
   }
 });

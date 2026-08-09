@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import threading
@@ -23,6 +24,25 @@ VIEWPORTS = [
     (1280, 800),
     (1440, 900),
 ]
+
+PANEL_VIEWPORTS = [
+    (1120, 820),
+    (720, 820),
+    (719, 820),
+    (390, 844),
+    (320, 568),
+]
+PANEL_REDUCED_MOTION = ("reduce", "no-preference")
+PANEL_KEY = "visual-panel-key"
+PANEL_COPY_SECRET = "visual-test-copy-secret"
+SYNTHETIC_NON_SCANNABLE_QR_DATA_URL = "data:image/svg+xml;base64," + base64.b64encode(
+    b"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="24" fill="#f4f7ef"/>
+  <circle cx="64" cy="68" r="30" fill="#b7f34b"/>
+  <path d="M118 38h98v26h-98zM40 124h176v18H40zM40 164h76v54H40zM140 164h76v22h-76zM140 198h76v20h-76z" fill="#111512"/>
+  <text x="128" y="105" text-anchor="middle" font-family="monospace" font-size="14" fill="#111512">VISUAL QA</text>
+</svg>"""
+).decode("ascii")
 
 MOCK_SOCKET = r"""
 (() => {
@@ -464,6 +484,331 @@ def unexpected_disconnected_errors(errors):
     ]
 
 
+def fulfill_panel_state(route):
+    route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "serviceStatus": "online",
+                "codexStatus": "logged-in",
+                "appServerStatus": "online",
+                "workspace": "D:\\visual-qa\\codex-remote",
+                "lanOrigin": "http://192.168.1.2:8766",
+                "tunnelOrigin": "https://public-access.invalid",
+                "tools": {"ffmpeg": True, "cloudflared": True},
+                "diagnostics": [
+                    "Synthetic public tunnel is ready",
+                    "LAN access remains off until explicitly requested",
+                ],
+            }
+        ),
+    )
+
+
+def fulfill_panel_connection(route, observed_modes):
+    request = route.request
+    if request.method != "POST":
+        route.fulfill(
+            status=405,
+            content_type="application/json",
+            body=json.dumps({"error": "method_not_allowed"}),
+        )
+        return
+
+    try:
+        payload = request.post_data_json or {}
+    except (TypeError, ValueError):
+        payload = {}
+    mode = payload.get("mode")
+    if mode not in {"remote", "lan"}:
+        route.fulfill(
+            status=400,
+            content_type="application/json",
+            body=json.dumps({"error": "invalid_mode"}),
+        )
+        return
+
+    observed_modes.append(mode)
+    display_urls = {
+        "remote": "https://public-access.invalid/[credentials-hidden]",
+        "lan": "http://192.168.1.2:8766/[credentials-hidden]",
+    }
+    copy_urls = {
+        "remote": f"https://public-access.invalid/?token={PANEL_COPY_SECRET}-remote",
+        "lan": f"http://192.168.1.2:8766/?token={PANEL_COPY_SECRET}-lan",
+    }
+    route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "mode": mode,
+                "displayUrl": display_urls[mode],
+                "copyUrl": copy_urls[mode],
+                "qrDataUrl": SYNTHETIC_NON_SCANNABLE_QR_DATA_URL,
+                "qrError": "",
+                "expiresAt": int(time.time() * 1000) + 5 * 60 * 1000,
+            }
+        ),
+    )
+
+
+def create_panel_connection_handler(observed_modes):
+    def handle(route):
+        fulfill_panel_connection(route, observed_modes)
+
+    return handle
+
+
+def panel_metrics(page):
+    return page.evaluate(
+        """() => {
+          const visible = (node) => {
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            return !node.hidden && style.display !== 'none' && style.visibility !== 'hidden'
+              && rect.width > 0 && rect.height > 0;
+          };
+          const smallTargets = [...document.querySelectorAll(
+            'button,a[href],input:not([type="hidden"]),select,textarea,summary,[role="button"]'
+          )]
+            .filter(visible)
+            .map((node) => {
+              const rect = node.getBoundingClientRect();
+              return {
+                id: node.id || node.className || node.textContent.trim().slice(0, 24),
+                width: rect.width,
+                height: rect.height,
+              };
+            })
+            .filter((item) => item.width < 44 || item.height < 44);
+          return {
+            overflowX: document.documentElement.scrollWidth
+              - document.documentElement.clientWidth,
+            smallTargets,
+            bodyText: document.body.innerText,
+            bodyHtml: document.body.innerHTML,
+            currentUrl: window.location.href,
+            hash: window.location.hash,
+          };
+        }"""
+    )
+
+
+def assert_panel_layout_and_secrets(page, state, width, height, reduced_motion):
+    current = panel_metrics(page)
+    label = f"{state} at {width}x{height} / {reduced_motion}"
+    if current["overflowX"] > 1:
+        raise AssertionError(
+            f"desktop panel horizontal overflow {label}: {current['overflowX']}px"
+        )
+    if current["smallTargets"]:
+        raise AssertionError(
+            f"desktop panel targets below 44px {label}: {current['smallTargets']}"
+        )
+    for secret in ("visual-test-token", PANEL_KEY, PANEL_COPY_SECRET):
+        if (
+            secret in current["bodyText"]
+            or secret in current["bodyHtml"]
+            or secret in current["currentUrl"]
+        ):
+            raise AssertionError(f"desktop panel exposed synthetic secret {label}: {secret}")
+    if current["hash"]:
+        raise AssertionError(f"desktop panel did not clear its capability hash {label}")
+    return {
+        "state": state,
+        "size": f"{width}x{height}",
+        "reducedMotion": reduced_motion,
+        "overflowX": current["overflowX"],
+        "smallTargets": current["smallTargets"],
+    }
+
+
+def assert_lan_qr_not_obscured(page, width, height, reduced_motion):
+    overlap = page.evaluate(
+        """() => {
+          const qr = document.querySelector('#lanQr')?.getBoundingClientRect();
+          const actions = document.querySelector('#panelActions')?.getBoundingClientRect();
+          if (!qr || !actions || qr.width <= 0 || qr.height <= 0
+              || actions.width <= 0 || actions.height <= 0) return null;
+          const intersects = qr.left < actions.right && qr.right > actions.left
+            && qr.top < actions.bottom && qr.bottom > actions.top;
+          return intersects ? {
+            qr: { top: qr.top, bottom: qr.bottom },
+            actions: { top: actions.top, bottom: actions.bottom },
+          } : null;
+        }"""
+    )
+    if overlap:
+        raise AssertionError(
+            "LAN QR is obscured by the panel action bar at "
+            f"{width}x{height} / {reduced_motion}: {overlap}"
+        )
+
+
+def verify_panel_viewports(browser, base):
+    panel_results = []
+    panel_url = base.replace(
+        "index.html?token=visual-test-token",
+        f"panel.html#panel={PANEL_KEY}",
+    )
+
+    for width, height in PANEL_VIEWPORTS:
+        for reduced_motion in PANEL_REDUCED_MOTION:
+            context = browser.new_context(
+                viewport={"width": width, "height": height},
+                device_scale_factor=1,
+                reduced_motion=reduced_motion,
+                locale="zh-CN",
+                service_workers="block",
+            )
+            page = context.new_page()
+            errors = []
+            observed_modes = []
+            page.on(
+                "pageerror",
+                lambda error, target=errors: target.append(f"pageerror: {error}"),
+            )
+            page.on(
+                "console",
+                lambda message, target=errors: target.append(
+                    f"console {message.type}: {message.text}"
+                )
+                if message.type == "error"
+                else None,
+            )
+            page.route("**/api/panel/state", fulfill_panel_state)
+            page.route(
+                "**/api/panel/connection",
+                create_panel_connection_handler(observed_modes),
+            )
+
+            try:
+                page.goto(panel_url, wait_until="networkidle")
+                page.wait_for_selector("#panelControls:not([hidden])")
+                page.wait_for_selector("#remoteConnection[data-state='ready']")
+                page.wait_for_function("window.location.hash === ''")
+                page.wait_for_function(
+                    """() => {
+                      const qr = document.querySelector('#remoteQr');
+                      return !qr.hidden && qr.complete && qr.naturalWidth > 0;
+                    }"""
+                )
+
+                if observed_modes.count("lan") != 0:
+                    raise AssertionError(
+                        f"desktop panel requested LAN during initial load: {observed_modes}"
+                    )
+                if observed_modes.count("remote") != 1:
+                    raise AssertionError(
+                        f"desktop panel did not request public access exactly once: "
+                        f"{observed_modes}"
+                    )
+                if not page.locator("#lanConnection").is_hidden():
+                    raise AssertionError("desktop panel exposed LAN during initial load")
+                if (
+                    page.locator("#remoteQr").get_attribute("src")
+                    != SYNTHETIC_NON_SCANNABLE_QR_DATA_URL
+                ):
+                    raise AssertionError(
+                        "public visual QA did not render the synthetic QR image"
+                    )
+
+                public_metrics = assert_panel_layout_and_secrets(
+                    page, "panel-public", width, height, reduced_motion
+                )
+                page.screenshot(
+                    path=str(
+                        OUTPUT
+                        / (
+                            f"codex-ui-panel-public-{width}x{height}"
+                            f"-{reduced_motion}.png"
+                        )
+                    ),
+                    full_page=False,
+                )
+
+                page.locator("#connectionOptionsSummary").click()
+                page.wait_for_function(
+                    "document.querySelector('#connectionOptions').open === true"
+                )
+                if observed_modes.count("lan") != 0:
+                    raise AssertionError(
+                        f"opening connection options requested LAN: {observed_modes}"
+                    )
+                if not page.locator("#lanConnection").is_hidden():
+                    raise AssertionError("opening connection options exposed LAN")
+                assert_panel_layout_and_secrets(
+                    page, "panel-options", width, height, reduced_motion
+                )
+
+                page.locator("#showLanConnection").click()
+                page.wait_for_function(
+                    """() => {
+                      const card = document.querySelector('#lanConnection');
+                      const qr = document.querySelector('#lanQr');
+                      return !card.hidden && card.dataset.state === 'ready'
+                        && !qr.hidden && qr.hasAttribute('src')
+                        && qr.complete && qr.naturalWidth > 0;
+                    }"""
+                )
+                if observed_modes.count("lan") != 1:
+                    raise AssertionError(
+                        f"LAN reveal did not issue exactly one request: {observed_modes}"
+                    )
+                if not page.locator("#lanConnection").is_visible():
+                    raise AssertionError("LAN connection stayed hidden after explicit reveal")
+                if (
+                    page.locator("#lanQr").get_attribute("src")
+                    != SYNTHETIC_NON_SCANNABLE_QR_DATA_URL
+                ):
+                    raise AssertionError("LAN visual QA did not render the synthetic QR image")
+
+                lan_metrics = assert_panel_layout_and_secrets(
+                    page, "panel-lan", width, height, reduced_motion
+                )
+                assert_lan_qr_not_obscured(page, width, height, reduced_motion)
+                page.screenshot(
+                    path=str(
+                        OUTPUT
+                        / (
+                            f"codex-ui-panel-lan-{width}x{height}"
+                            f"-{reduced_motion}.png"
+                        )
+                    ),
+                    full_page=False,
+                )
+
+                page.locator("#hideLanConnection").click()
+                page.wait_for_function(
+                    """() => {
+                      const card = document.querySelector('#lanConnection');
+                      const qr = document.querySelector('#lanQr');
+                      return card.hidden && qr.hidden && !qr.hasAttribute('src');
+                    }"""
+                )
+                if observed_modes.count("lan") != 1:
+                    raise AssertionError(
+                        f"hiding LAN changed its request count: {observed_modes}"
+                    )
+                assert_panel_layout_and_secrets(
+                    page, "panel-lan-hidden", width, height, reduced_motion
+                )
+                if errors:
+                    raise AssertionError(
+                        f"desktop panel browser errors at {width}x{height} "
+                        f"/ {reduced_motion}: {errors}"
+                    )
+
+                public_metrics["connectionModes"] = list(observed_modes)
+                panel_results.extend([public_metrics, lan_metrics])
+            finally:
+                context.close()
+
+    return panel_results
+
+
 def run():
     if not EDGE.exists():
         raise RuntimeError(f"Microsoft Edge was not found at {EDGE}")
@@ -688,53 +1033,7 @@ def run():
             )
             offline_context.close()
 
-            panel = browser.new_page(viewport={"width": 1280, "height": 800})
-            panel_errors = []
-            panel.on(
-                "pageerror", lambda error: panel_errors.append(f"pageerror: {error}")
-            )
-            panel.on(
-                "console",
-                lambda message: panel_errors.append(
-                    f"console {message.type}: {message.text}"
-                )
-                if message.type == "error"
-                else None,
-            )
-            panel.route(
-                "**/api/panel/state",
-                lambda route: route.fulfill(
-                    status=200,
-                    content_type="application/json",
-                    body=json.dumps(
-                        {
-                            "serviceStatus": "online",
-                            "codexStatus": "logged-in",
-                            "appServerStatus": "online",
-                            "workspace": "D:\\研究项目\\Codex Remote",
-                            "lanOrigin": "http://192.168.1.2:8766",
-                            "tunnelOrigin": "https://redacted.trycloudflare.com",
-                            "tools": {"ffmpeg": True, "cloudflared": True},
-                            "diagnostics": ["QR 渲染器已恢复", "隧道在线"],
-                        },
-                        ensure_ascii=False,
-                    ),
-                ),
-            )
-            panel.goto(
-                base.replace(
-                    "index.html?token=visual-test-token",
-                    "panel.html#panel=visual-panel-key",
-                ),
-                wait_until="networkidle",
-            )
-            panel.wait_for_selector("#panelControls:not([hidden])")
-            panel.screenshot(path=str(OUTPUT / "codex-ui-panel-1280x800.png"), full_page=False)
-            if panel.evaluate("document.documentElement.scrollWidth - innerWidth") > 1:
-                raise AssertionError("desktop relay panel has horizontal overflow")
-            if panel_errors:
-                raise AssertionError(f"desktop relay panel browser errors: {panel_errors}")
-            panel.close()
+            results.extend(verify_panel_viewports(browser, base))
             browser.close()
     finally:
         server.shutdown()

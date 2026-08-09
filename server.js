@@ -3,10 +3,10 @@ import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import qrTerminal from "qrcode-terminal";
 import qrImage from "qrcode";
 import { loadConfig } from "./src/config.js";
 import { createPanelSession } from "./src/panel-session.js";
+import { openDesktopPanel } from "./src/desktop-panel.js";
 import { checkCodexLoginStatus } from "./src/codex-status.js";
 import { CodexProcess } from "./src/codex-process.js";
 import { CodexAdapter } from "./src/codex-adapter.js";
@@ -29,22 +29,10 @@ function resolvePackageBin() {
 }
 
 export function selectPhoneBaseUrl({
-  env = process.env,
   port,
   interfaces = os.networkInterfaces(),
 } = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new TypeError("invalid phone port");
-  const explicitUrl = env.CODEX_REMOTE_PUBLIC_URL?.trim();
-  if (explicitUrl) {
-    const parsed = new URL(explicitUrl);
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      throw new Error("CODEX_REMOTE_PUBLIC_URL must use http or https");
-    }
-    return explicitUrl.replace(/\/+$/, "");
-  }
-  const explicitHost = env.CODEX_REMOTE_PUBLIC_HOST?.trim();
-  if (explicitHost) return `http://${explicitHost}:${port}`;
-
   const candidates = Object.entries(interfaces).flatMap(([adapter, entries]) => (
     (entries ?? []).map((entry) => ({ ...entry, adapter }))
   )).filter((entry) => (
@@ -59,9 +47,8 @@ export function selectPhoneBaseUrl({
   );
   const virtualAdapter = /(?:vethernet|wsl|docker|vmware|virtualbox|hyper-v|tailscale|zerotier|loopback|bluetooth|xray|wintun|wireguard|openvpn|vpn)/i;
   const physical = candidates.filter((entry) => !virtualAdapter.test(entry.adapter));
-  const selected = physical.find(isPrivate) ?? physical[0] ?? candidates.find(isPrivate) ?? candidates[0];
-  const address = selected?.address ?? "127.0.0.1";
-  return `http://${address}:${port}`;
+  const selected = physical.find(isPrivate);
+  return selected ? `http://${selected.address}:${port}` : null;
 }
 
 function isFalseFlag(value) {
@@ -70,6 +57,19 @@ function isFalseFlag(value) {
 
 function isTrueFlag(value) {
   return ["1", "true", "on", "yes"].includes(String(value).trim().toLowerCase());
+}
+
+function publicUrlForLog(value) {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return "[unavailable]";
+  }
 }
 
 export function isTunnelEnabled(env = process.env) {
@@ -117,21 +117,6 @@ export function createWindowsKeepAwake({
   };
 }
 
-function showPhoneAccess({ baseUrl, token, rendezvous, label, hint, log, onError, qrGenerate }) {
-  log(`${label}: ${baseUrl}`);
-  if (hint) log(hint);
-  log("Scan this QR code with your phone:");
-  const phoneUrl = buildPhoneUrl(baseUrl, token, rendezvous?.url, rendezvous?.deviceId);
-  try {
-    qrGenerate(phoneUrl, { small: true }, (code) => log(code));
-  } catch (cause) {
-    let detail = String(cause?.message || cause || "unknown QR renderer error");
-    if (phoneUrl) detail = detail.replaceAll(phoneUrl, "[redacted]");
-    if (token) detail = detail.replaceAll(token, "[redacted]");
-    onError(`[qr] QR code rendering failed; the service is still running: ${detail}`);
-  }
-}
-
 async function cleanupStartupFailure(cause, resources) {
   const failures = [];
   const attempt = async (operation) => {
@@ -175,7 +160,8 @@ export async function main(options = {}) {
     createRemoteServerImpl = createRemoteServer,
     createTunnel = (settings) => new TunnelManager(settings),
     createKeepAwake = (settings) => createWindowsKeepAwake(settings),
-    qrGenerate = qrTerminal.generate.bind(qrTerminal),
+    networkInterfacesImpl = os.networkInterfaces,
+    openPanelImpl = openDesktopPanel,
     qrToDataUrl = (url) => qrImage.toDataURL(url, { width: 360, margin: 2 }),
     createPanelSessionImpl = createPanelSession,
     checkCodexLoginStatusImpl = checkCodexLoginStatus,
@@ -183,12 +169,15 @@ export async function main(options = {}) {
 
   const diagnostics = [];
   let configuredToken = null;
+  let configuredPanelKey = null;
   function reportDiagnostic(scope, cause) {
     let detail = String(cause?.message || cause || "unknown error");
     if (configuredToken) detail = detail.replaceAll(configuredToken, "[redacted]");
+    if (configuredPanelKey) detail = detail.replaceAll(configuredPanelKey, "[redacted]");
     if (env.USERPROFILE) detail = detail.replaceAll(env.USERPROFILE, "%USERPROFILE%");
     detail = detail
       .replace(/([?&]token=)[^&\s]+/gi, "$1[redacted]")
+      .replace(/#panel=[^&\s#]+/gi, "#panel=[redacted]")
       .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[redacted]")
       .slice(0, 240);
     const line = `[${scope}] ${detail}`;
@@ -210,12 +199,14 @@ export async function main(options = {}) {
   let artifactTickets = null;
   let remote = null;
   let panelSession = null;
+  let desktopPanelUrl = null;
   let phoneBaseUrl = null;
   let tunnel = null;
   let keepAwake = null;
   let tunnelOrigin = null;
   let codexStatus = "checking";
   let adapterOwnedByRemote = false;
+  let connectionsRevoked = false;
   try {
     artifactStore = await createArtifactStore({ root: artifactRoot });
     artifactTracker = createArtifactTracker({
@@ -260,10 +251,29 @@ export async function main(options = {}) {
         tools: { ffmpeg: Boolean(windowsRemote?.ffmpeg), cloudflared: Boolean(tunnel?.binary) },
         diagnostics,
       }),
-      connectionProvider: async () => {
-        if (!phoneBaseUrl) throw new Error("phone URL is not ready");
+      connectionProvider: async (mode) => {
+        let origin;
+        if (mode === "remote") {
+          if (connectionsRevoked || !tunnelOrigin) {
+            const cause = new Error("public connection not ready");
+            cause.code = "PUBLIC_CONNECTION_NOT_READY";
+            throw cause;
+          }
+          origin = tunnelOrigin;
+        } else if (mode === "lan") {
+          if (connectionsRevoked || !phoneBaseUrl) {
+            const cause = new Error("LAN connection not ready");
+            cause.code = "LAN_CONNECTION_NOT_READY";
+            throw cause;
+          }
+          origin = phoneBaseUrl;
+        } else {
+          const cause = new Error("invalid connection mode");
+          cause.code = "PANEL_CONNECTION_MODE";
+          throw cause;
+        }
         return buildPhoneUrl(
-          tunnelOrigin || phoneBaseUrl,
+          origin,
           config.token,
           config.rendezvous?.url,
           config.rendezvous?.deviceId,
@@ -271,6 +281,7 @@ export async function main(options = {}) {
       },
       qrToDataUrl,
     });
+    configuredPanelKey = panelSession?.key ?? null;
     artifactTickets = createArtifactTickets({});
     remote = await createRemoteServerImpl({
       adapter,
@@ -287,6 +298,13 @@ export async function main(options = {}) {
       onAdapterOwnership: () => { adapterOwnedByRemote = true; },
       onError: (cause) => reportDiagnostic("server", cause),
     });
+    phoneBaseUrl = selectPhoneBaseUrl({
+      port: remote.address.port,
+      interfaces: networkInterfacesImpl(),
+    });
+    if (platform === "win32" && !isTrueFlag(env.NO_PANEL)) {
+      desktopPanelUrl = panelSession.panelUrl(remote.httpUrl);
+    }
   } catch (cause) {
     await cleanupStartupFailure(cause, {
       artifactStore,
@@ -308,18 +326,18 @@ export async function main(options = {}) {
     reportDiagnostic("power", cause);
     keepAwake = null;
   }
-  phoneBaseUrl = selectPhoneBaseUrl({ env, port: remote.address.port });
-  log(`Desktop panel: ${panelSession.panelUrl(remote.httpUrl)}`);
-  showPhoneAccess({
-    baseUrl: phoneBaseUrl,
-    token: config.token,
-    rendezvous: config.rendezvous,
-    label: "Phone base URL",
-    hint: "[LAN ONLY / 仅局域网] Same Wi-Fi only. For travel, wait for the PUBLIC QR below.",
-    log,
-    onError: (cause) => reportDiagnostic("qr", cause),
-    qrGenerate,
-  });
+  if (desktopPanelUrl) {
+    try {
+      const panel = openPanelImpl(desktopPanelUrl, {
+        platform,
+        env,
+        onError: (cause) => reportDiagnostic("panel", cause),
+      });
+      if (panel?.opened) log("Desktop control panel opened.");
+    } catch (cause) {
+      reportDiagnostic("panel", cause);
+    }
+  }
 
   let tunnelListener = null;
   let shownTunnelUrl = null;
@@ -333,21 +351,14 @@ export async function main(options = {}) {
         onError: (cause) => reportDiagnostic("tunnel", cause),
       });
       tunnelListener = (status) => {
-        tunnelOrigin = status?.state === "online" && status.url ? status.url : null;
+        const onlineUrl = status?.state === "online" && status.url ? status.url : null;
+        tunnelOrigin = onlineUrl;
+        if (!onlineUrl) shownTunnelUrl = null;
         const event = { type: "tunnel", ...status };
         remote.broadcast?.(event);
-        if (status?.state === "online" && status.url && status.url !== shownTunnelUrl) {
-          shownTunnelUrl = status.url;
-          showPhoneAccess({
-            baseUrl: status.url,
-            token: config.token,
-            rendezvous: config.rendezvous,
-            label: "Tunnel base URL",
-            hint: "[PUBLIC / 外网] Use mobile data or any Wi-Fi. VPN is not required. Scan this one before leaving.",
-            log,
-            onError: (cause) => reportDiagnostic("qr", cause),
-            qrGenerate,
-          });
+        if (onlineUrl && onlineUrl !== shownTunnelUrl) {
+          shownTunnelUrl = onlineUrl;
+          log(`Public remote URL: ${publicUrlForLog(onlineUrl)}`);
         }
       };
       tunnel.on?.("status", tunnelListener);
@@ -374,6 +385,8 @@ export async function main(options = {}) {
     process.off("SIGTERM", shutdown);
   };
   const close = () => {
+    connectionsRevoked = true;
+    tunnelOrigin = null;
     closing ??= (async () => {
       removeSignalHandlers();
       if (tunnel && tunnelListener) tunnel.off?.("status", tunnelListener);
