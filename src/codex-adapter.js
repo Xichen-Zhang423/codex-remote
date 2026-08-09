@@ -18,6 +18,21 @@ const MAX_EARLY_FILE_CHANGES = 1_000;
 const HISTORY_RPC_TIMEOUT_MS = 60_000;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_MAX_RESTART_DELAY_MS = 30_000;
+const MAX_PROCESS_LOG_BUFFER = 4_096;
+
+function isInitializeTimeout(error) {
+  return error?.code === "RPC_TIMEOUT" && error?.method === "initialize";
+}
+
+function boundedProcessDiagnostic(value) {
+  return String(value ?? "")
+    .replace(/([?&]token=)[^&\s]+/gi, "$1[redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, "[redacted]")
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~-]+/gi, "$1[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(-240);
+}
 
 function boundedRestartDelay(attempt, baseMs, maxMs) {
   const exponent = Math.min(30, Math.max(0, attempt - 1));
@@ -108,6 +123,8 @@ export class CodexAdapter {
     this.startPromiseEpoch = null;
     this.exitCleanup = null;
     this.processListeners = null;
+    this.processLogTail = "";
+    this.processLogTruncated = false;
     this.phoneListeners = new Set();
     this.desired = false;
     this.restartAttempts = 0;
@@ -159,7 +176,7 @@ export class CodexAdapter {
       const recoveryThreadId = this.recoveryThreadId;
       this.phase = "starting";
       try {
-        const result = this.process ? await this.process.start() : {};
+        const result = this.process ? await this.#startProcessWithRetry(lifecycleEpoch) : {};
         const candidateRpc = this.process ? this.process.rpc : this.rpc;
         if (!candidateRpc) throw new Error("Codex App Server did not expose an RPC client");
         const connection = { lifecycleEpoch, exitSerial, rpc: candidateRpc };
@@ -211,7 +228,11 @@ export class CodexAdapter {
         }
         if (this.process) {
           this.rpc = null;
-          this.process.stop();
+          try {
+            await this.process.stop();
+          } catch (stopError) {
+            this.#report(stopError);
+          }
         }
         throw error;
       }
@@ -245,7 +266,7 @@ export class CodexAdapter {
     this.started = false;
     this.#unbindProcess();
     await this.#abortAll(new Error("Codex adapter stopped"), "adapter_stop");
-    this.process?.stop();
+    await this.process?.stop();
     if (this.process) this.rpc = null;
     this.phase = "stopped";
   }
@@ -751,10 +772,21 @@ export class CodexAdapter {
     const exit = (code, signal) => {
       void this.#handleProcessExit(code, signal).catch((error) => this.#report(error));
     };
-    this.processListeners = { notification, serverRequest, exit };
+    const log = (chunk) => {
+      const combined = `${this.processLogTail}${String(chunk ?? "")}`;
+      this.processLogTruncated ||= combined.length > MAX_PROCESS_LOG_BUFFER;
+      this.processLogTail = combined.slice(-MAX_PROCESS_LOG_BUFFER);
+    };
+    const protocolError = (error) => {
+      const detail = boundedProcessDiagnostic(error?.message || error);
+      this.#report(new Error(`Codex App Server protocol error${detail ? `: ${detail}` : ""}`));
+    };
+    this.processListeners = { notification, serverRequest, exit, log, protocolError };
     this.process.on("notification", notification);
     this.process.on("serverRequest", serverRequest);
     this.process.on("exit", exit);
+    this.process.on("log", log);
+    this.process.on("protocolError", protocolError);
   }
 
   #unbindProcess() {
@@ -763,6 +795,38 @@ export class CodexAdapter {
       this.process.off(event, listener);
     }
     this.processListeners = null;
+  }
+
+  async #startProcessWithRetry(lifecycleEpoch) {
+    this.processLogTail = "";
+    this.processLogTruncated = false;
+    try {
+      return await this.process.start();
+    } catch (error) {
+      if (!isInitializeTimeout(error)) throw error;
+      const processDetail = this.#processDiagnosticDetail();
+      const detail = processDetail ? ` Last App Server output: ${processDetail}` : "";
+      this.#report(new Error(`Codex App Server initialize timed out; retrying once.${detail}`));
+      await this.process.stop();
+      this.#assertLifecycle(lifecycleEpoch);
+      this.processLogTail = "";
+      this.processLogTruncated = false;
+      try {
+        return await this.process.start();
+      } catch (retryError) {
+        if (isInitializeTimeout(retryError)) {
+          const retryProcessDetail = this.#processDiagnosticDetail();
+          const retryDetail = retryProcessDetail ? ` Last App Server output: ${retryProcessDetail}` : "";
+          this.#report(new Error(`Codex App Server initialize failed after retry.${retryDetail}`));
+        }
+        throw retryError;
+      }
+    }
+  }
+
+  #processDiagnosticDetail() {
+    if (this.processLogTruncated) return "[App Server output exceeded safe diagnostic limit]";
+    return boundedProcessDiagnostic(this.processLogTail);
   }
 
   async #handleProcessExit(code, signal) {

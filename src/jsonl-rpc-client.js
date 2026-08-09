@@ -50,6 +50,16 @@ export class RpcRemoteError extends Error {
   }
 }
 
+export class RpcTimeoutError extends Error {
+  constructor(method, timeoutMs) {
+    super(`${method} timed out after ${timeoutMs}ms`);
+    this.name = "RpcTimeoutError";
+    this.code = "RPC_TIMEOUT";
+    this.method = method;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export class JsonlRpcClient extends EventEmitter {
   #blocked = false;
   #writing = false;
@@ -185,7 +195,7 @@ export class JsonlRpcClient extends EventEmitter {
     if (!pending || pending.timer) return;
     pending.timer = setTimeout(() => {
       if (!this.pending.delete(id)) return;
-      pending.reject(new Error(`${pending.method} timed out after ${pending.timeoutMs}ms`));
+      pending.reject(new RpcTimeoutError(pending.method, pending.timeoutMs));
     }, pending.timeoutMs);
   }
 

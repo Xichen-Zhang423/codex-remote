@@ -131,7 +131,12 @@ test("request timeout cleans pending state", async () => {
   const rpc = new JsonlRpcClient({ input, output, timeoutMs: 100 });
   const pending = rpc.request("thread/list", {}, { timeoutMs: 10 });
   const [request] = readFrames(output);
-  await assert.rejects(pending, /thread\/list timed out after 10ms/);
+  const timeout = await pending.catch((error) => error);
+  assert.equal(timeout.name, "RpcTimeoutError");
+  assert.equal(timeout.code, "RPC_TIMEOUT");
+  assert.equal(timeout.method, "thread/list");
+  assert.equal(timeout.timeoutMs, 10);
+  assert.match(timeout.message, /thread\/list timed out after 10ms/);
   assert.equal(rpc.pending.size, 0);
   input.write(`${JSON.stringify({ id: request.id, result: "late" })}\n`);
   rpc.close();

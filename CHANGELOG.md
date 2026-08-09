@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Hardened Codex App Server startup with an initialize-specific timeout, one clean retry after confirmed process shutdown, and bounded redacted diagnostics for transient stalls.
+
 ## 0.1.0 - 2026-07-15
 
 ### Added

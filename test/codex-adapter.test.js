@@ -121,12 +121,128 @@ test("start binds process events once and stop detaches them", async () => {
   await adapter.start();
   await adapter.start();
   assert.equal(process.starts, 1);
-  for (const name of ["notification", "serverRequest", "exit"]) assert.equal(process.listenerCount(name), 1);
+  for (const name of ["notification", "serverRequest", "exit", "log", "protocolError"]) {
+    assert.equal(process.listenerCount(name), 1);
+  }
   process.emit("notification", { method: "item/agentMessage/delta", params: { delta: "hi" } });
   await waitFor(() => events.some((event) => event.type === "assistant_delta"));
   await adapter.stop();
-  for (const name of ["notification", "serverRequest", "exit"]) assert.equal(process.listenerCount(name), 0);
+  for (const name of ["notification", "serverRequest", "exit", "log", "protocolError"]) {
+    assert.equal(process.listenerCount(name), 0);
+  }
   assert.equal(process.stops, 1);
+});
+
+test("initial initialize timeout is reported and retried once with a clean process", async () => {
+  const rpc = makeRpc();
+  const splitSecret = `sk-${"A".repeat(40)}`;
+  class TransientProcess extends EventEmitter {
+    constructor() {
+      super();
+      this.rpc = null;
+      this.starts = 0;
+      this.stops = 0;
+    }
+    async start() {
+      this.starts += 1;
+      if (this.starts === 1) {
+        this.emit("log", `temporary startup warning ${splitSecret.slice(0, 10)}`);
+        this.emit("log", `${splitSecret.slice(10)}\n`);
+        const error = new Error("initialize timed out after 30000ms");
+        error.code = "RPC_TIMEOUT";
+        error.method = "initialize";
+        error.timeoutMs = 30_000;
+        throw error;
+      }
+      this.rpc = rpc;
+      return { userAgent: "recovered" };
+    }
+    stop() { this.stops += 1; this.rpc = null; }
+  }
+  const process = new TransientProcess();
+  const diagnostics = [];
+  const adapter = new CodexAdapter({
+    process,
+    cwd: "D:\\repo",
+    onError: (error) => diagnostics.push(error.message),
+  });
+
+  assert.deepEqual(await adapter.start(), { userAgent: "recovered" });
+  assert.equal(process.starts, 2);
+  assert.equal(process.stops, 1);
+  assert.equal(adapter.started, true);
+  assert.equal(adapter.appServerStatus, "online");
+  assert.equal(diagnostics.length, 1);
+  assert.match(diagnostics[0], /initialize timed out.*retrying once/i);
+  assert.match(diagnostics[0], /temporary startup warning/i);
+  assert.equal(diagnostics[0].replace(/\s+/g, "").includes(splitSecret), false);
+  assert.match(diagnostics[0], /\[redacted\]/);
+  await adapter.stop();
+});
+
+test("a second initialize timeout fails without an unbounded startup loop", async () => {
+  const timeout = () => {
+    const error = new Error("initialize timed out after 30000ms");
+    error.code = "RPC_TIMEOUT";
+    error.method = "initialize";
+    error.timeoutMs = 30_000;
+    return error;
+  };
+  const process = new SequencedProcess([timeout(), timeout(), makeRpc()]);
+  const diagnostics = [];
+  const adapter = new CodexAdapter({
+    process,
+    cwd: "D:\\repo",
+    onError: (error) => diagnostics.push(error.message),
+  });
+
+  await assert.rejects(adapter.start(), /initialize timed out after 30000ms/);
+  assert.equal(process.starts, 2);
+  assert.equal(process.stops, 2);
+  assert.equal(adapter.started, false);
+  assert.equal(adapter.appServerStatus, "offline");
+  assert.equal(diagnostics.length, 2);
+  assert.match(diagnostics[0], /retrying once/i);
+  assert.match(diagnostics[1], /failed after retry/i);
+});
+
+test("initialize retry waits for confirmed cleanup before starting a replacement", async () => {
+  const closeGate = deferred();
+  const rpc = makeRpc();
+  class ClosingProcess extends EventEmitter {
+    constructor() {
+      super();
+      this.rpc = null;
+      this.starts = 0;
+      this.stops = 0;
+    }
+    async start() {
+      this.starts += 1;
+      if (this.starts === 1) {
+        const error = new Error("initialize timed out after 30000ms");
+        error.code = "RPC_TIMEOUT";
+        error.method = "initialize";
+        throw error;
+      }
+      this.rpc = rpc;
+      return { userAgent: "replacement" };
+    }
+    stop() {
+      this.stops += 1;
+      this.rpc = null;
+      return closeGate.promise;
+    }
+  }
+  const process = new ClosingProcess();
+  const adapter = new CodexAdapter({ process, cwd: "D:\\repo" });
+
+  const starting = adapter.start();
+  await waitFor(() => process.stops === 1, "failed process cleanup");
+  assert.equal(process.starts, 1);
+  closeGate.resolve();
+  assert.deepEqual(await starting, { userAgent: "replacement" });
+  assert.equal(process.starts, 2);
+  await adapter.stop();
 });
 
 test("maps thread, history, and model operations to pinned v2 methods", async () => {

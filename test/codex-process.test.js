@@ -43,6 +43,8 @@ function createHarness(options = {}) {
     packageBin: options.packageBin,
     env: options.env || {},
     platform: options.platform || "linux",
+    stopGraceMs: options.stopGraceMs,
+    stopForceMs: options.stopForceMs,
   });
   return { manager, child: children[0], calls };
 }
@@ -79,8 +81,8 @@ test("initializeAppServer awaits the exact initialize request before notifying i
   let resolveRequest;
   const response = { userAgent: "codex" };
   const rpc = {
-    request(method, params) {
-      calls.push(["request", method, params]);
+    request(method, params, options) {
+      calls.push(["request", method, params, options]);
       return new Promise((resolve) => { resolveRequest = resolve; });
     },
     notify(method, params) { calls.push(["notify", method, params]); },
@@ -89,7 +91,7 @@ test("initializeAppServer awaits the exact initialize request before notifying i
   assert.deepEqual(calls, [["request", "initialize", {
     clientInfo: { name: "codex_remote", title: "Codex Remote", version: "0.1.0" },
     capabilities: { experimentalApi: false },
-  }]]);
+  }, { timeoutMs: 30_000 }]]);
   resolveRequest(response);
   assert.equal(await pending, response);
   assert.deepEqual(calls[1], ["notify", "initialized", {}]);
@@ -278,6 +280,66 @@ test("stop is idempotent and closes and kills only the currently owned child onc
   assert.equal(child.killCalls, 1);
   assert.equal(manager.child, null);
   assert.equal(manager.rpc, null);
+});
+
+test("stop settles only after the retired App Server child closes", async () => {
+  const { manager, child } = createHarness();
+  await finishInitialization(child, manager.start());
+
+  const stopping = manager.stop();
+  assert.equal(typeof stopping?.then, "function");
+  let settled = false;
+  stopping.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(child.killCalls, 1);
+
+  child.emit("close", 0, null);
+  await stopping;
+  assert.equal(settled, true);
+});
+
+test("stop force-kills once and rejects if the child still never closes", async () => {
+  const { manager, child } = createHarness({ stopGraceMs: 5, stopForceMs: 5 });
+  await finishInitialization(child, manager.start());
+
+  const stopping = manager.stop();
+  assert.equal(typeof stopping?.then, "function");
+  await assert.rejects(stopping, (error) => error?.code === "APP_SERVER_STOP_TIMEOUT");
+  assert.equal(child.killCalls, 2);
+});
+
+test("a stop timeout blocks every replacement until the retired child eventually closes", async () => {
+  const oldChild = new FakeChild();
+  const newChild = new FakeChild();
+  const { manager, calls } = createHarness({
+    children: [oldChild, newChild],
+    stopGraceMs: 5,
+    stopForceMs: 5,
+  });
+  await finishInitialization(oldChild, manager.start());
+  await assert.rejects(manager.stop(), (error) => error?.code === "APP_SERVER_STOP_TIMEOUT");
+
+  const blocked = manager.start();
+  try {
+    assert.equal(calls.length, 1);
+    await assert.rejects(blocked, (error) => error?.code === "APP_SERVER_STOP_TIMEOUT");
+  } finally {
+    if (calls.length > 1) {
+      const cleanup = manager.stop();
+      newChild.emit("close", 0, null);
+      await cleanup;
+      await Promise.allSettled([blocked]);
+    }
+  }
+
+  oldChild.emit("close", 0, null);
+  const replacement = manager.start();
+  assert.equal(calls.length, 2);
+  await finishInitialization(newChild, replacement);
+  const cleanup = manager.stop();
+  newChild.emit("close", 0, null);
+  await cleanup;
 });
 
 test("retired child absorbs post-kill errors until close without affecting a replacement", async () => {
