@@ -25,7 +25,7 @@ const REQUIRED_PATHS = [
   "README.md", "LICENSE", "SECURITY.md", "CONTRIBUTING.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
   "package.json", "package-lock.json", "app-android/package.json", "app-android/package-lock.json",
   "public/index.html", "public/panel.html", "public/panel.js", "public/manifest.webmanifest", "public/sw.js",
-  "src/desktop-panel.js",
+  "src/desktop-panel.js", "scripts/benchmark-startup.mjs",
   ".github/workflows/build-apk.yml",
   ".github/workflows/verify.yml",
 ];

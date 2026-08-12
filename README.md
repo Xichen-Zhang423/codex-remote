@@ -78,9 +78,9 @@ npx --yes --package @openai/codex@0.144.1 codex login status
 .\start.bat
 ```
 
-登录成功后，`start.bat` 会把仓库当作只读安装介质，根据内容哈希在 `%LOCALAPPDATA%\CodexRemote\runtime\<内容哈希>` 原子准备运行时，并把 npm 缓存放到 `%LOCALAPPDATA%\CodexRemote\npm-cache`。它不会在仓库里创建 `config.json` 或 `node_modules`。
+登录成功后，`start.bat` 会把仓库当作只读安装介质，在 `%LOCALAPPDATA%\CodexRemote\runtime` 原子准备小型应用快照和共享依赖缓存，并把 npm 下载缓存放到 `%LOCALAPPDATA%\CodexRemote\npm-cache`。第一次使用新版缓存格式时会正常安装一次；以后只更新程序代码会复用共享依赖缓存，不再重复运行 npm 安装。它不会在仓库里创建 `config.json` 或 `node_modules`。
 
-首次启动会在 `%LOCALAPPDATA%\CodexRemote\config.json` 生成本机专用的随机访问 token，默认端口为 `8766`。服务监听成功后自动打开桌面控制台。桌面控制台默认公网：公网隧道 ready 后才生成主二维码；如需同一 Wi-Fi 直连，展开“连接选项”并点击“显示局域网连接”，此时才会生成局域网二维码。仅展开连接选项不会创建连接。
+首次启动会在 `%LOCALAPPDATA%\CodexRemote\config.json` 生成本机专用的随机访问 token，默认端口为 `8766`。桌面控制台会先立即打开，Codex App Server 在后台初始化；状态变为在线前可以查看本机连接与诊断，但要等初始化完成后再发送任务。桌面控制台默认公网：公网隧道 ready 后才生成主二维码；如需同一 Wi-Fi 直连，展开“连接选项”并点击“显示局域网连接”，此时才会生成局域网二维码。仅展开连接选项不会创建连接。
 
 如果二维码渲染失败，服务仍会继续运行，桌面控制台会保留可复制的连接入口。关闭桌面控制台不会停止服务；继续使用手机遥控时，必须保持 `start.bat` 启动窗口和电脑开机、联网。
 
@@ -168,7 +168,7 @@ $env:NO_TUNNEL="1"
 
 | 脚本 | 用途 |
 |---|---|
-| [start.bat](./start.bat) | 检查环境，通过用户本地内容哈希运行时安装依赖并启动。 |
+| [start.bat](./start.bat) | 检查环境，通过小型应用快照和共享依赖缓存快速启动。 |
 | [创建桌面图标.bat](./创建桌面图标.bat) | 创建当前用户桌面快捷方式。 |
 | [设置开机自启.bat](./设置开机自启.bat) | 创建独立的 `CodexRemote.lnk`。 |
 | [取消开机自启.bat](./取消开机自启.bat) | 只删除上述 Codex Remote 快捷方式。 |
@@ -216,6 +216,7 @@ Codex Remote 应发布为独立的 `codex-remote` 仓库，不要把它推送到
 
 ```powershell
 npm ci --no-audit --no-fund
+npm run benchmark:startup
 npm run verify
 npm run release:verify
 npm run release:copy

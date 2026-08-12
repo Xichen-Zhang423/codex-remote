@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { RPC_DEPENDENT_MESSAGE_TYPES } from "../src/remote-server.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (name) => fs.readFileSync(path.join(root, "public", name), "utf8");
@@ -42,6 +43,7 @@ test("status and error regions announce stable UI state", () => {
   const panel = read("panel.html");
   assert.match(html, /id=["']historyDrawer["'][^>]*class=["'][^"']*history-drawer/);
   assert.match(html, /id=["']settingsDrawer["'][^>]*class=["'][^"']*settings-drawer/);
+  assert.match(html, /id=["']connectionText["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
   assert.match(html, /id=["']artifactStatus["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
   assert.match(panel, /id=["']panelStatus["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
   assert.match(panel, /id=["']remoteState["'][^>]*role=["']status["'][^>]*aria-live=["']polite["']/);
@@ -77,6 +79,109 @@ test("frontend handles the stable phone protocol and avoids untrusted innerHTML"
   assert.match(app, /\.inert =/);
   assert.match(app, /if \(globalThis\.Capacitor\) return/);
   assert.doesNotMatch(app, /\.innerHTML\s*=/);
+});
+
+test("frontend treats Codex readiness separately from the phone WebSocket", () => {
+  const app = read("app.js");
+  assert.doesNotMatch(app, /appServerStatus:\s*["']online["']/);
+  assert.match(
+    app,
+    /function\s+isCodexReady\(\)\s*\{[\s\S]{0,180}state\.connected\s*&&\s*state\.appServerStatus\s*===\s*["']online["']/,
+  );
+
+  const socketOpen = app.match(/socket\.addEventListener\(["']open["'][\s\S]*?socket\.addEventListener\(["']message["']/)?.[0] || "";
+  assert.match(socketOpen, /setConnection\(["']connecting["']/);
+  assert.doesNotMatch(socketOpen, /setConnection\(["']online["']/);
+
+  const syncSystem = app.match(/function\s+syncSystem\(message\)[\s\S]*?\r?\n\s*}\r?\n\r?\n\s*function\s+clearReconnectTimer/)?.[0] || "";
+  assert.match(syncSystem, /appServerStatus\s*===\s*["']restarting["'][\s\S]{0,180}setBusy\(false\)/);
+  assert.match(syncSystem, /appServerStatus\s*===\s*["']offline["'][\s\S]{0,180}setBusy\(false\)/);
+  assert.match(syncSystem, /appServerStatus\s*===\s*["']online["'][\s\S]{0,180}setConnection\(["']online["']/);
+
+  const submitPrompt = app.match(/function\s+submitPrompt\(forcedText\)[\s\S]*?\r?\n\s*}\r?\n\r?\n\s*function\s+sameImages/)?.[0] || "";
+  assert.match(submitPrompt, /if\s*\(!isCodexReady\(\)\)[\s\S]{0,260}return/);
+  assert.ok(
+    submitPrompt.indexOf("if (!isCodexReady())") < submitPrompt.indexOf("const requestId"),
+    "readiness must be checked before an optimistic prompt can clear the draft",
+  );
+});
+
+test("frontend disables Codex RPC controls without blocking PC-local tools", () => {
+  const app = read("app.js");
+  const readyTypes = app.match(/const\s+CODEX_RPC_MESSAGE_TYPES\s*=\s*new Set\(\[[\s\S]*?\]\);/)?.[0] || "";
+  for (const type of [
+    "prompt", "interrupt", "permission", "newConversation", "listConversations",
+    "loadConversation", "renameConversation", "archiveConversation", "refreshHistory", "listModels",
+  ]) assert.match(readyTypes, new RegExp(`["']${type}["']`));
+  for (const type of [
+    "screenshot", "control", "listDir", "listRoots", "mkdir",
+    "setModel", "setEffort", "setSessionAuto", "listArtifacts", "createArtifactTicket",
+  ]) assert.doesNotMatch(readyTypes, new RegExp(`["']${type}["']`));
+  const frontendTypes = [...readyTypes.matchAll(/["']([^"']+)["']/g)].map((match) => match[1]);
+  assert.deepEqual(frontendTypes, [...RPC_DEPENDENT_MESSAGE_TYPES]);
+
+  const controls = app.match(/function\s+syncCodexControls\(\)[\s\S]*?\r?\n\s*}\r?\n\r?\n/)?.[0] || "";
+  assert.match(controls, /el\.sendBtn\.disabled\s*=\s*!ready\s*\|\|\s*Boolean\(state\.pendingPrompt\)/);
+  assert.match(controls, /el\.newConversationBtn\.disabled\s*=\s*!acceptsConversationAction/);
+  assert.match(controls, /el\.useDirectoryBtn\.disabled\s*=\s*!acceptsConversationAction\s*\|\|\s*!state\.directoryPath/);
+  assert.match(controls, /el\.conversationList\.querySelectorAll\(["']\[data-codex-action\]["']\)/);
+  assert.match(controls, /el\.approvalActions\.querySelectorAll\(["']button["']\)/);
+
+  assert.match(app, /if\s*\(!sendCodexWire\(\{\s*type:\s*["']newConversation["'][\s\S]{0,180}\}\)\)\s*return;[\s\S]{0,100}clearTimeline\(\)/);
+  assert.match(app, /if\s*\(!sendCodexWire\(\{\s*type:\s*["']loadConversation["'][\s\S]{0,120}\}\)\)\s*return;[\s\S]{0,100}clearTimeline\(\)/);
+  assert.match(app, /if\s*\(!sendCodexWire\(\{\s*type:\s*["']permission["']/);
+
+  const screenshot = app.match(/function\s+requestScreenshot\(\)[\s\S]*?\r?\n\s*}\r?\n/)?.[0] || "";
+  assert.doesNotMatch(screenshot, /isCodexReady|sendCodexWire/);
+  assert.match(screenshot, /sendWire\(\{\s*type:\s*["']screenshot["']/);
+  assert.match(app, /sendWire\(\{\s*type:\s*["']setModel["']/);
+  assert.match(app, /sendWire\(\{\s*type:\s*["']setEffort["']/);
+  assert.match(app, /sendWire\(\{\s*type:\s*["']setSessionAuto["']/);
+});
+
+test("frontend commits prompts only after the matching server acknowledgement", () => {
+  const app = read("app.js");
+  const stateBlock = app.match(/const\s+state\s*=\s*\{[\s\S]*?\r?\n\s*\};/)?.[0] || "";
+  assert.match(stateBlock, /pendingPrompt:\s*null/);
+
+  const submitPrompt = app.match(/function\s+submitPrompt\(forcedText\)[\s\S]*?\r?\n\s*}\r?\n\r?\n\s*function\s+sameImages/)?.[0] || "";
+  assert.match(submitPrompt, /if\s*\(state\.pendingPrompt\)/);
+  assert.match(submitPrompt, /state\.pendingPrompt\s*=\s*pending/);
+  assert.match(submitPrompt, /const\s+images\s*=\s*forced\s*\?\s*\[\]\s*:\s*\[\.\.\.state\.images\]/);
+  assert.doesNotMatch(submitPrompt, /renderOptimisticUser\(/);
+  assert.doesNotMatch(submitPrompt, /clearImages\(\)/);
+  assert.doesNotMatch(submitPrompt, /el\.input\.value\s*=\s*["']/);
+
+  const acknowledge = app.match(/function\s+acknowledgePrompt\(message\)[\s\S]*?\r?\n\s*}\r?\n\r?\n\s*function\s+autoResizeInput/)?.[0] || "";
+  assert.match(acknowledge, /message\.requestId\s*!==\s*pending\.requestId/);
+  assert.match(acknowledge, /renderOptimisticUser\(pending\.text,\s*pending\.images\)/);
+  assert.match(acknowledge, /const\s+composerUnchanged\s*=\s*el\.input\.value\s*===\s*pending\.composerText\s*&&\s*sameImages\(state\.images,\s*pending\.composerImages\)/);
+  assert.match(acknowledge, /if\s*\(!pending\.forced\s*&&\s*composerUnchanged\)\s*\{[\s\S]{0,180}el\.input\.value\s*=\s*["']["'][\s\S]{0,120}clearImages\(\)/);
+  assert.match(acknowledge, /state\.pendingPrompt\s*=\s*null/);
+
+  const receive = app.match(/function\s+receive\(message\)[\s\S]*?\r?\n\s*}\r?\n\r?\n\s*function\s+handleTunnel/)?.[0] || "";
+  assert.match(receive, /case\s+["']prompt_queued["']:[\s\S]{0,160}if\s*\(acknowledgePrompt\(message\)\)\s*\{[\s\S]{0,120}updateQueue\(message\.queueLength\)[\s\S]{0,80}setBusy\(true\)/);
+  assert.match(receive, /case\s+["']error["']:[\s\S]{0,400}message\.code\s*===\s*["']APP_SERVER_UNAVAILABLE["'][\s\S]{0,120}cancelPendingPrompt\(/);
+});
+
+test("frontend preserves pending prompt drafts across disconnect paths", () => {
+  const app = read("app.js");
+  const cancelPending = app.match(/function\s+cancelPendingPrompt\([^)]*\)[\s\S]*?\r?\n\s*}\r?\n/)?.[0] || "";
+  assert.match(cancelPending, /state\.pendingPrompt\s*=\s*null/);
+  assert.match(cancelPending, /setBusy\(false\)/);
+  assert.doesNotMatch(cancelPending, /clearImages\(|el\.input\.value\s*=/);
+
+  const socketError = app.match(/socket\.addEventListener\(["']error["'][\s\S]*?\r?\n\s*}\);/)?.[0] || "";
+  assert.match(socketError, /state\.connected\s*=\s*false/);
+  assert.match(socketError, /state\.appServerStatus\s*=\s*["']offline["']/);
+  assert.match(socketError, /cancelPendingPrompt\(/);
+  assert.match(socketError, /syncCodexControls\(\)/);
+
+  const offline = app.match(/window\.addEventListener\(["']offline["'][\s\S]*?\r?\n\s*}\);/)?.[0] || "";
+  assert.match(offline, /state\.connected\s*=\s*false/);
+  assert.match(offline, /state\.appServerStatus\s*=\s*["']offline["']/);
+  assert.match(offline, /cancelPendingPrompt\(/);
+  assert.match(offline, /syncCodexControls\(\)/);
 });
 
 test("workspace picker can leave the current folder and switch filesystem roots", () => {

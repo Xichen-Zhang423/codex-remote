@@ -57,6 +57,35 @@ test("README and usage guide describe the public-first desktop console", () => {
   assert.match(readme, /自动化[^\n]*(?:mock|固定场景)[^\n]*不包含真实[^\n]*(?:token|秘密)/i);
 });
 
+test("startup docs promise an immediate control surface and reusable dependency cache", () => {
+  const readme = read("README.md");
+  const guide = read("docs/使用教程.md");
+
+  for (const [name, document] of [["README", readme], ["usage guide", guide]]) {
+    assert.match(
+      document,
+      /桌面控制台[^\n。]{0,80}(?:先|立即)[^\n。]{0,80}(?:Codex App Server|Codex 引擎)[^\n。]{0,80}后台初始化/,
+      `${name}: control surface must not wait for Codex initialization`,
+    );
+    assert.match(document, /共享依赖缓存/, `${name}: shared dependency cache`);
+    assert.match(
+      document,
+      /(?:只|仅)[^\n。]{0,20}(?:更新|修改)[^\n。]{0,40}(?:程序|应用)代码[^\n。]{0,120}(?:不会|无需|不再)[^\n。]{0,30}(?:npm|重新安装)/i,
+      `${name}: code-only upgrades must not reinstall dependencies`,
+    );
+  }
+
+  const changelog = read("CHANGELOG.md");
+  assert.match(changelog, /background[^\n]*Codex App Server|Codex App Server[^\n]*background/i);
+  assert.match(changelog, /shared dependency cache/i);
+
+  const checklist = read("docs/发布检查清单.md");
+  assert.match(readme, /npm run benchmark:startup/);
+  assert.match(guide, /npm run benchmark:startup/);
+  assert.match(checklist, /npm run benchmark:startup/);
+  assert.match(guide, /临时目录[\s\S]{0,80}(?:不会|不)[\s\S]{0,30}(?:真实 token|真实遥控服务|工作区)/);
+});
+
 test("README states security approval artifact and platform boundaries", () => {
   const readme = read("README.md");
   assert.match(readme, /官方 Codex CLI[\s\S]*登录[\s\S]*不复制[\s\S]*认证/);
@@ -138,6 +167,7 @@ test("release checklist separates automated gates from unchecked manual acceptan
   const checklist = read("docs/发布检查清单.md");
   for (const command of [
     "npm ci --no-audit --no-fund",
+    "npm run benchmark:startup",
     "npm run verify",
     "npm run release:verify",
     "npm run release:copy",

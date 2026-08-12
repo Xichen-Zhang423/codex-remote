@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 import express from "express";
 
@@ -128,6 +129,52 @@ test("serves GET HEAD and exact single byte ranges from the immutable copy", asy
   assert.equal(fx.counters.released, 6);
 });
 
+test("streams from the verified handle when the artifact path is replaced before response", async (t) => {
+  const fx = await fixture(t);
+  const record = await fx.artifact("verified-handle.txt", "GOOD");
+  const originalOpen = fx.store.openContent;
+  let replacementPath;
+  fx.store.openContent = async (id) => {
+    const lease = await originalOpen.call(fx.store, id);
+    replacementPath = lease.path;
+    const displaced = `${lease.path}.verified`;
+    await fs.rename(lease.path, displaced);
+    await fs.writeFile(lease.path, "EVIL");
+    return lease;
+  };
+
+  const response = await fetch(fx.url(record, fx.ticket(record)));
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), "GOOD");
+  assert.equal(await fs.readFile(replacementPath, "utf8"), "EVIL");
+  await waitFor(() => fx.counters.released === 1);
+});
+
+test("store close and HTTP completion release an in-flight verified handle idempotently", async (t) => {
+  const fx = await fixture(t);
+  const record = await fx.artifact("shutdown-stream.txt", Buffer.alloc(4 * 1024 * 1024, 0x63));
+  await new Promise((resolve, reject) => {
+    const request = http.get(fx.url(record, fx.ticket(record)), (response) => {
+      response.once("data", async () => {
+        try {
+          await fx.actualStore.close();
+          response.destroy();
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.once("error", (error) => {
+      if (error.code === "ECONNRESET") resolve();
+      else reject(error);
+    });
+  });
+  await waitFor(() => fx.counters.released === 1);
+  assert.equal(fx.counters.acquired, 1);
+  assert.equal(fx.counters.released, 1);
+});
+
 test("returns 416 for malformed unsatisfiable and multi-range requests, including empty files", async (t) => {
   const fx = await fixture(t);
   const record = await fx.artifact("range.txt", "abcdef");
@@ -193,8 +240,16 @@ test("releases the artifact lease after completion invalid ranges stream errors 
   const originalOpen = fx.store.openContent;
   fx.store.openContent = async (id) => {
     const lease = await originalOpen.call(fx.store, id);
-    await fs.rm(lease.path, { force: true });
-    return lease;
+    return {
+      ...lease,
+      createReadStream() {
+        return new Readable({
+          read() {
+            this.destroy(new Error("injected stream failure"));
+          },
+        });
+      },
+    };
   };
   await assert.rejects(fetch(fx.url(record, fx.ticket(record))));
   await waitFor(() => fx.counters.released === 3);

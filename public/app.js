@@ -8,6 +8,12 @@
   const MAX_IMAGES = 4;
   const MAX_IMAGE_DATA_LENGTH = 8 * 1024 * 1024;
   const RECONNECT_DELAYS = [800, 1_500, 3_000, 5_000, 8_000, 12_000, 18_000];
+  // Keep this list in sync with the exported server-side
+  // RPC_DEPENDENT_MESSAGE_TYPES contract.
+  const CODEX_RPC_MESSAGE_TYPES = new Set([
+    "prompt", "interrupt", "permission", "newConversation", "listConversations",
+    "loadConversation", "renameConversation", "archiveConversation", "refreshHistory", "listModels",
+  ]);
   const DEFAULT_QUICK = [
     { label: "检查现场", prompt: "检查当前工作区的状态，指出最值得先处理的问题。" },
     { label: "运行测试", prompt: "运行与当前项目匹配的测试，定位失败原因并修复。" },
@@ -77,13 +83,14 @@
     model: null,
     effort: null,
     sessionAuto: false,
-    appServerStatus: "online",
+    appServerStatus: "offline",
     conversations: [],
     models: [],
     directoryPath: null,
     approvals: [],
     approvalDrafts: new Map(),
     images: [],
+    pendingPrompt: null,
     optimisticEchoes: [],
     lastServerEcho: null,
     quick: [],
@@ -301,6 +308,30 @@
     el.connectionText.textContent = text;
   }
 
+  function isCodexReady() {
+    return state.connected && state.appServerStatus === "online";
+  }
+
+  function syncCodexControls() {
+    const ready = isCodexReady();
+    const acceptsConversationAction = ready && !state.pendingPrompt;
+    el.sendBtn.disabled = !ready || Boolean(state.pendingPrompt);
+    el.stopBtn.disabled = !ready;
+    el.newConversationBtn.disabled = !acceptsConversationAction;
+    el.useDirectoryBtn.disabled = !acceptsConversationAction || !state.directoryPath;
+    for (const button of el.conversationList.querySelectorAll("[data-codex-action]")) button.disabled = !acceptsConversationAction;
+    for (const button of el.approvalActions.querySelectorAll("button")) button.disabled = !ready;
+  }
+
+  function cancelPendingPrompt(message = "") {
+    const hadPendingPrompt = Boolean(state.pendingPrompt);
+    state.pendingPrompt = null;
+    setBusy(false);
+    syncCodexControls();
+    if (hadPendingPrompt && message) toast(message, "error");
+    return hadPendingPrompt;
+  }
+
   function setBusy(value) {
     state.busy = value === true;
     el.runState.classList.toggle("is-active", state.busy);
@@ -343,12 +374,16 @@
     el.sessionAutoToggle.checked = state.sessionAuto;
     el.modelSelect.value = state.model || "";
     refreshEffortOptions();
-    if (state.connected && state.appServerStatus === "restarting") {
+    if (state.connected && state.appServerStatus === "online") {
+      setConnection("online", "电脑在线");
+    } else if (state.connected && state.appServerStatus === "restarting") {
       setBusy(false);
       setConnection("connecting", "Codex 正在恢复");
-    } else if (state.connected && state.appServerStatus === "online") {
-      setConnection("online", "电脑在线");
+    } else if (state.connected && state.appServerStatus === "offline") {
+      setBusy(false);
+      setConnection("offline", "电脑已连接 · Codex 不可用");
     }
+    syncCodexControls();
   }
 
   function clearReconnectTimer() {
@@ -380,7 +415,10 @@
       return;
     }
     if (!force && state.socket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.socket.readyState)) return;
-    if (force) resetConnectionTransients();
+    if (force) {
+      cancelPendingPrompt("连接正在刷新，待发送任务内容已保留");
+      resetConnectionTransients();
+    }
     clearReconnectTimer();
     clearSocketOpenTimer();
     if (state.socket) {
@@ -391,7 +429,9 @@
 
     const epoch = ++state.socketEpoch;
     state.connected = false;
+    state.appServerStatus = "offline";
     setConnection("connecting", "正在连接");
+    syncCodexControls();
     const backend = await resolveRendezvous(state.backend);
     if (epoch !== state.socketEpoch) return;
 
@@ -411,7 +451,10 @@
       if (state.socket !== socket || socket.readyState !== WebSocket.CONNECTING) return;
       state.socket = null;
       state.connected = false;
+      state.appServerStatus = "offline";
+      cancelPendingPrompt("连接超时，待发送任务内容已保留");
       setConnection("offline", "连接超时，正在重试");
+      syncCodexControls();
       try { socket.close(); } catch { /* the browser may already be closing it */ }
       scheduleReconnect();
     }, 12_000);
@@ -421,7 +464,8 @@
       state.connected = true;
       state.reconnectAttempt = 0;
       if (!el.screenViewer.hidden || !el.controlViewer.hidden) requestScreenshot();
-      setConnection("online", "电脑在线");
+      setConnection("connecting", "电脑已连接，正在同步 Codex");
+      syncCodexControls();
       toast("已连接 Codex Remote");
     });
     socket.addEventListener("message", (event) => {
@@ -435,13 +479,21 @@
       clearSocketOpenTimer();
       state.socket = null;
       state.connected = false;
+      state.appServerStatus = "offline";
+      cancelPendingPrompt("连接已断开，待发送任务内容已保留");
       resetConnectionTransients({ preserveApprovalDrafts: event.code !== 4001 });
       setConnection("offline", event.code === 4001 ? "连接密钥无效" : "连接已断开");
+      syncCodexControls();
       if (event.code === 4001) toast("连接密钥无效，请重新扫码", "error");
       else scheduleReconnect();
     });
     socket.addEventListener("error", () => {
-      if (state.socket === socket) setConnection("offline", "网络不可用");
+      if (state.socket !== socket) return;
+      state.connected = false;
+      state.appServerStatus = "offline";
+      cancelPendingPrompt("网络异常，待发送任务内容已保留");
+      setConnection("offline", "网络不可用");
+      syncCodexControls();
     });
   }
 
@@ -968,8 +1020,10 @@
         }
         break;
       case "prompt_queued":
-        updateQueue(message.queueLength);
-        setBusy(true);
+        if (acknowledgePrompt(message)) {
+          updateQueue(message.queueLength);
+          setBusy(true);
+        }
         break;
       case "interrupt_ack":
         toast(message.accepted ? "已请求中断当前任务" : "当前没有可中断的任务");
@@ -981,6 +1035,9 @@
         break;
       case "tunnel": handleTunnel(message); break;
       case "error":
+        if (message.code === "APP_SERVER_UNAVAILABLE") {
+          cancelPendingPrompt("Codex 未接收任务，内容已保留，请恢复后重试");
+        }
         if (state.screenPending) {
           state.screenPending = false;
           el.screenHint.hidden = false;
@@ -1004,25 +1061,56 @@
 
   function submitPrompt(forcedText) {
     const text = forcedText === undefined ? el.input.value.trim() : String(forcedText).trim();
-    const images = [...state.images];
+    const forced = forcedText !== undefined;
+    const images = forced ? [] : [...state.images];
     if (!text && !images.length) return;
-    if (!state.connected) {
-      toast("尚未连接电脑，请检查连接设置", "error");
+    if (state.pendingPrompt) {
+      toast("上一条任务正在确认，请稍候", "error");
       return;
     }
-    if (state.appServerStatus === "restarting") {
-      toast("Codex 正在恢复，请稍后再试", "error");
+    if (!isCodexReady()) {
+      toast(state.connected ? "Codex 尚未就绪，任务内容已保留" : "尚未连接电脑，请检查连接设置", "error");
       return;
     }
     const requestId = globalThis.crypto?.randomUUID?.() || `prompt-${Date.now()}`;
-    if (!sendWire({ type: "prompt", text, images, requestId })) return;
-    renderOptimisticUser(text, images);
-    el.input.value = "";
-    autoResizeInput();
-    clearImages();
+    const pending = {
+      requestId,
+      text,
+      images,
+      composerText: el.input.value,
+      composerImages: [...state.images],
+      forced,
+    };
+    state.pendingPrompt = pending;
+    syncCodexControls();
+    if (!sendCodexWire({ type: "prompt", text, images, requestId })) {
+      state.pendingPrompt = null;
+      syncCodexControls();
+      return;
+    }
     setBusy(true);
+  }
+
+  function sameImages(left, right) {
+    return left.length === right.length && left.every((source, index) => source === right[index]);
+  }
+
+  function acknowledgePrompt(message) {
+    const pending = state.pendingPrompt;
+    if (!pending || message.requestId !== pending.requestId) return false;
+    state.pendingPrompt = null;
+    renderOptimisticUser(pending.text, pending.images);
+    const composerUnchanged = el.input.value === pending.composerText
+      && sameImages(state.images, pending.composerImages);
+    if (!pending.forced && composerUnchanged) {
+      el.input.value = "";
+      autoResizeInput();
+      clearImages();
+    }
     state.stickToBottom = true;
     scrollToBottom();
+    syncCodexControls();
+    return true;
   }
 
   function autoResizeInput() {
@@ -1142,6 +1230,7 @@
     el.conversationList.replaceChildren();
     if (!state.conversations.length) {
       el.conversationList.appendChild(create("div", "empty-list", "没有找到会话记录"));
+      syncCodexControls();
       return;
     }
     for (const item of state.conversations) {
@@ -1149,6 +1238,7 @@
       const row = create("div", `conversation-row${item.id === state.threadId ? " is-current" : ""}`);
       const main = create("button", "conversation-main");
       main.type = "button";
+      main.dataset.codexAction = "loadConversation";
       const dateValue = item.updatedAt || item.createdAt;
       let date = "";
       if (dateValue) {
@@ -1162,33 +1252,38 @@
       );
       main.addEventListener("click", () => {
         if (item.id !== state.threadId) {
+          if (!sendCodexWire({ type: "loadConversation", threadId: item.id })) return;
           clearTimeline();
-          sendWire({ type: "loadConversation", threadId: item.id });
         }
         closeDrawers();
       });
       const actions = create("div", "conversation-actions");
       const rename = create("button", "", "✎");
       rename.type = "button";
+      rename.dataset.codexAction = "renameConversation";
       rename.title = "重命名";
       rename.setAttribute("aria-label", `重命名 ${conversationName(item)}`);
       rename.addEventListener("click", () => {
+        if (!requireCodexReady()) return;
         const next = window.prompt("新的会话名称", conversationName(item));
-        if (next?.trim()) sendWire({ type: "renameConversation", threadId: item.id, name: next.trim() });
+        if (next?.trim()) sendCodexWire({ type: "renameConversation", threadId: item.id, name: next.trim() });
       });
       const archive = create("button", "", "□");
       archive.type = "button";
+      archive.dataset.codexAction = "archiveConversation";
       archive.title = "归档";
       archive.setAttribute("aria-label", `归档 ${conversationName(item)}`);
       archive.addEventListener("click", () => {
+        if (!requireCodexReady()) return;
         if (window.confirm(`归档“${conversationName(item)}”？可在 Codex 历史中恢复。`)) {
-          sendWire({ type: "archiveConversation", threadId: item.id });
+          sendCodexWire({ type: "archiveConversation", threadId: item.id });
         }
       });
       append(actions, rename, archive);
       append(row, main, actions);
       el.conversationList.appendChild(row);
     }
+    syncCodexControls();
   }
 
   function modelId(model) {
@@ -1280,7 +1375,7 @@
     el.directoryUpBtn.disabled = !parent;
     el.mkdirBtn.disabled = false;
     el.mkdirName.disabled = false;
-    el.useDirectoryBtn.disabled = !state.directoryPath;
+    syncCodexControls();
     el.directoryList.replaceChildren();
     const entries = Array.isArray(message.entries) ? [...message.entries] : [];
     entries.sort((a, b) => Number(Boolean(b.isDirectory)) - Number(Boolean(a.isDirectory)) || String(a.name).localeCompare(String(b.name), "zh-CN"));
@@ -1297,6 +1392,18 @@
       el.directoryList.appendChild(button);
     }
     if (!entries.length) el.directoryList.appendChild(create("div", "empty-list", "此目录为空"));
+  }
+
+  function sendCodexWire(message) {
+    if (!message || !CODEX_RPC_MESSAGE_TYPES.has(message.type)) return false;
+    if (!requireCodexReady()) return false;
+    return sendWire(message);
+  }
+
+  function requireCodexReady() {
+    if (isCodexReady()) return true;
+    toast(state.connected ? "Codex 尚未就绪，请稍后再试" : "尚未连接电脑，请检查连接设置", "error");
+    return false;
   }
 
   function renderDirectoryRoots(message) {
@@ -1322,6 +1429,7 @@
       el.directoryList.appendChild(button);
     }
     if (!el.directoryList.childElementCount) el.directoryList.appendChild(create("div", "empty-list", "未找到可用磁盘"));
+    syncCodexControls();
   }
 
   function captureApprovalDraft() {
@@ -1477,10 +1585,9 @@
   function decideApproval(action, payload = {}) {
     const current = state.approvals[0];
     if (!current) return;
+    if (!requireCodexReady()) { syncCodexControls(); return; }
     for (const button of el.approvalActions.querySelectorAll("button")) button.disabled = true;
-    if (!sendWire({ type: "permission", id: current.id, action, payload })) {
-      for (const button of el.approvalActions.querySelectorAll("button")) button.disabled = false;
-    }
+    if (!sendCodexWire({ type: "permission", id: current.id, action, payload })) syncCodexControls();
   }
 
   function showApproval() {
@@ -1489,6 +1596,7 @@
     el.approvalSheet.hidden = false;
     const finalize = () => {
       restoreApprovalDraft(current);
+      syncCodexControls();
       activateModal(el.approvalSheet, el.approvalActions.querySelector("button"));
     };
     el.approvalKind.textContent = approvalKindLabel(current.kind);
@@ -2037,7 +2145,7 @@
       void addImageFiles([...(el.imageInput.files || [])]);
       el.imageInput.value = "";
     });
-    el.stopBtn.addEventListener("click", () => sendWire({ type: "interrupt" }));
+    el.stopBtn.addEventListener("click", () => sendCodexWire({ type: "interrupt" }));
 
     el.messages.addEventListener("scroll", () => {
       state.stickToBottom = el.messages.scrollHeight - el.messages.scrollTop - el.messages.clientHeight < 90;
@@ -2050,15 +2158,15 @@
 
     el.historyBtn.addEventListener("click", () => {
       openDrawer(el.historyDrawer);
-      sendWire({ type: "listConversations", searchTerm: el.conversationSearch.value.trim() || undefined });
+      sendCodexWire({ type: "listConversations", searchTerm: el.conversationSearch.value.trim() || undefined });
       renderConversations();
     });
     el.settingsBtn.addEventListener("click", () => {
       openDrawer(el.settingsDrawer);
-      sendWire({ type: "listModels" });
+      sendCodexWire({ type: "listModels" });
       updateBackendStatus();
     });
-    el.modelBtn.addEventListener("click", () => { openDrawer(el.settingsDrawer); sendWire({ type: "listModels" }); el.modelSelect.focus(); });
+    el.modelBtn.addEventListener("click", () => { openDrawer(el.settingsDrawer); sendCodexWire({ type: "listModels" }); el.modelSelect.focus(); });
     el.cwdBtn.addEventListener("click", openWorkspace);
     el.browseCwdBtn.addEventListener("click", openWorkspace);
     el.drawerBackdrop.addEventListener("click", closeDrawers);
@@ -2067,10 +2175,10 @@
     let searchTimer;
     el.conversationSearch.addEventListener("input", () => {
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => sendWire({ type: "listConversations", searchTerm: el.conversationSearch.value.trim() || undefined }), 250);
+      searchTimer = setTimeout(() => sendCodexWire({ type: "listConversations", searchTerm: el.conversationSearch.value.trim() || undefined }), 250);
     });
     el.newConversationBtn.addEventListener("click", () => {
-      sendWire({ type: "newConversation", cwd: state.cwd, model: state.model, effort: state.effort });
+      if (!sendCodexWire({ type: "newConversation", cwd: state.cwd, model: state.model, effort: state.effort })) return;
       clearTimeline();
       closeDrawers();
       toast("已开始新会话");
@@ -2141,7 +2249,7 @@
     });
     el.useDirectoryBtn.addEventListener("click", () => {
       if (!state.directoryPath) return;
-      sendWire({ type: "newConversation", cwd: state.directoryPath, model: state.model, effort: state.effort });
+      if (!sendCodexWire({ type: "newConversation", cwd: state.directoryPath, model: state.model, effort: state.effort })) return;
       clearTimeline();
       closeDrawers();
       toast("已在所选目录开始新会话");
@@ -2206,7 +2314,13 @@
     });
     window.addEventListener("pageshow", (event) => { if (event.persisted) void connect(true); });
     window.addEventListener("online", () => void connect(true));
-    window.addEventListener("offline", () => setConnection("offline", "设备离线"));
+    window.addEventListener("offline", () => {
+      state.connected = false;
+      state.appServerStatus = "offline";
+      cancelPendingPrompt("设备离线，待发送任务内容已保留");
+      setConnection("offline", "设备离线");
+      syncCodexControls();
+    });
     window.addEventListener("pagehide", (event) => { if (!event.persisted) artifactUI.destroy(); });
   }
 
@@ -2226,6 +2340,7 @@
     renderAttachments();
     refreshNotificationStatus();
     registerEvents();
+    syncCodexControls();
     setupVoice();
     registerServiceWorker();
     autoResizeInput();

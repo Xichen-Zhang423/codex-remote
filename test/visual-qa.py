@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import tempfile
 import threading
 import time
 from functools import partial
@@ -12,7 +13,10 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "public"
-OUTPUT = Path(os.environ.get("CODEX_VISUAL_DIR", ROOT / "test-artifacts"))
+OUTPUT = Path(
+    os.environ.get("CODEX_VISUAL_DIR")
+    or Path(tempfile.gettempdir()) / "CodexRemote-visual-qa"
+)
 EDGE = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
 
 VIEWPORTS = [
@@ -75,7 +79,7 @@ MOCK_SOCKET = r"""
         this.readyState = MockWebSocket.OPEN;
         this.emit("open", {});
         this.message({ type: "hello", version: 1, capabilities: ["codex", "threads", "images", "approvals", "screen", "control", "artifacts"] });
-        this.message({ type: "system_init", cwd: "D:\\work\\codex-remote", model: "gpt-5.4", effort: "high", threadId: "thread-1", queueLength: 0, sessionAuto: false });
+        this.message({ type: "system_init", cwd: "D:\\work\\codex-remote", model: "gpt-5.4", effort: "high", threadId: "thread-1", queueLength: 0, sessionAuto: false, appServerStatus: "online" });
         this.message({ type: "history", events: [
           { type: "user_echo", text: "检查当前实现并给出可执行结论。" },
           { type: "thinking", text: "我会先核对协议边界，再检查界面与测试。" },
@@ -107,6 +111,13 @@ MOCK_SOCKET = r"""
     send(raw) {
       const message = JSON.parse(raw);
       window.__lastWire = message;
+      if (message.type === "prompt") {
+        window.__pendingPromptWire = message;
+        if (window.__autoAcknowledgePrompt !== false) {
+          setTimeout(() => this.message({ type: "prompt_queued", requestId: message.requestId, queueLength: 1 }), 20);
+        }
+        return;
+      }
       if (message.type === "listArtifacts") {
         this.message({ type: "artifact_snapshot", requestId: message.requestId, threadId: message.threadId,
           revision: 4, complete: window.__artifactComplete !== false,
@@ -335,6 +346,57 @@ def open_artifact_page(browser, base, width, height):
     page.locator("#toastRegion").evaluate("node => node.replaceChildren()")
     assert_artifact_groups(page)
     return context, page, errors
+
+
+def verify_prompt_acknowledgement(browser, base):
+    context = browser.new_context(
+        viewport={"width": 390, "height": 844},
+        locale="zh-CN",
+        reduced_motion="reduce",
+        service_workers="block",
+    )
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(f"pageerror: {error}"))
+    page.on(
+        "console",
+        lambda message: errors.append(f"console {message.type}: {message.text}")
+        if message.type == "error"
+        else None,
+    )
+    page.add_init_script(MOCK_SOCKET)
+    try:
+        page.goto(base, wait_until="networkidle")
+        wait_for_condition(page, "() => !document.querySelector('#sendBtn').disabled")
+        page.evaluate("window.__autoAcknowledgePrompt = false")
+        page.locator("#input").fill("原始任务")
+        page.locator("#sendBtn").click()
+        wait_for_condition(page, "() => Boolean(window.__pendingPromptWire?.requestId)")
+        if page.locator("#input").input_value() != "原始任务":
+            raise AssertionError("prompt draft cleared before server acknowledgement")
+        if not page.locator("#sendBtn").is_disabled():
+            raise AssertionError("duplicate prompt submit remained enabled before acknowledgement")
+
+        page.locator("#input").fill("用户继续编辑的新任务")
+        page.evaluate(
+            """() => window.__mockEmit({ type: 'prompt_queued',
+              requestId: window.__pendingPromptWire.requestId, queueLength: 1 })"""
+        )
+        wait_for_condition(page, "() => !document.querySelector('#sendBtn').disabled")
+        if page.locator("#input").input_value() != "用户继续编辑的新任务":
+            raise AssertionError("prompt acknowledgement cleared a newer composer draft")
+        if page.locator(".entry-label").filter(has_text="YOU / QUEUED").count() != 1:
+            raise AssertionError("matching prompt acknowledgement did not render the queued task")
+
+        page.evaluate("window.__autoAcknowledgePrompt = true")
+        page.locator(".quick-commands button").first.click()
+        wait_for_condition(page, "() => !document.querySelector('#sendBtn').disabled")
+        if page.locator("#input").input_value() != "用户继续编辑的新任务":
+            raise AssertionError("quick prompt acknowledgement cleared the user's composer draft")
+        if errors:
+            raise AssertionError(f"prompt acknowledgement browser errors: {errors}")
+    finally:
+        context.close()
 
 
 def verify_artifact_viewports(browser, base):
@@ -1005,6 +1067,7 @@ def run():
             verify_artifact_viewports(browser, base)
             verify_artifact_interactions(browser, base)
             verify_artifact_narrow_preview(browser, base)
+            verify_prompt_acknowledgement(browser, base)
 
             offline_context = browser.new_context(
                 viewport={"width": 390, "height": 844},

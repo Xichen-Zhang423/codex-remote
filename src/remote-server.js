@@ -17,6 +17,20 @@ const MAX_PENDING_INCOMING = 50;
 const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
 const MAX_OUTGOING_MESSAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TRANSCRIPT_EVENT_BYTES = 64 * 1024;
+// Keep local workspace, artifact, screen, and desktop-control operations usable
+// while only Codex App Server RPC is still starting or recovering.
+export const RPC_DEPENDENT_MESSAGE_TYPES = new Set([
+  "prompt",
+  "interrupt",
+  "permission",
+  "newConversation",
+  "listConversations",
+  "loadConversation",
+  "renameConversation",
+  "archiveConversation",
+  "refreshHistory",
+  "listModels",
+]);
 
 export const TRANSCRIPT_TYPES = new Set([
   "user_echo", "assistant_delta", "assistant", "thinking_delta", "thinking",
@@ -54,6 +68,20 @@ function safeWire(value, seen = new WeakSet(), depth = 0, budget = { nodes: 0 })
 
 function wireBytes(value) {
   try { return Buffer.byteLength(JSON.stringify(value)); } catch { return Number.POSITIVE_INFINITY; }
+}
+
+function classifyIncoming(wire) {
+  try {
+    const message = JSON.parse(wire);
+    return {
+      message,
+      parseError: false,
+      rpcDependent: Boolean(message && typeof message === "object" && !Array.isArray(message)
+        && RPC_DEPENDENT_MESSAGE_TYPES.has(message.type)),
+    };
+  } catch {
+    return { message: null, parseError: true, rpcDependent: false };
+  }
 }
 
 function cleanHistory(events, limit) {
@@ -190,6 +218,13 @@ export class RemoteServer extends EventEmitter {
     this.startPromise = null;
     this.closePromise = null;
     this.adapterStarted = false;
+    this.adapterReady = false;
+    this.adapterStopping = false;
+    this.adapterStartPromise = null;
+    this.adapterStartHandle = null;
+    this.adapterStartResolve = null;
+    this.adapterStartSettled = false;
+    this.adapterStartFailed = false;
     this.address = null;
   }
 
@@ -217,7 +252,6 @@ export class RemoteServer extends EventEmitter {
         this.onAdapterOwnership?.();
         this.onAdapterOwnership = null;
       }
-      await this.adapter.start?.();
       this.#createHttpSurface();
       await new Promise((resolve, reject) => {
         const onError = (error) => { this.httpServer.off("listening", onListening); reject(error); };
@@ -229,6 +263,7 @@ export class RemoteServer extends EventEmitter {
       this.address = this.httpServer.address();
       this.heartbeat = setInterval(() => this.#heartbeat(), 30_000);
       this.heartbeat.unref?.();
+      this.#scheduleAdapterStart();
       return this;
     } catch (error) {
       await this.#rollbackStart();
@@ -237,12 +272,17 @@ export class RemoteServer extends EventEmitter {
   }
 
   async #rollbackStart() {
+    this.adapterStopping = true;
+    this.adapterReady = false;
+    this.#cancelScheduledAdapterStart();
     try { this.unsubscribe?.(); } catch (error) { this.#report(error); }
     this.unsubscribe = null;
     try { this.unsubscribeArtifacts?.(); } catch (error) { this.#report(error); }
     this.unsubscribeArtifacts = null;
     for (const client of this.clients) {
       client.closed = true;
+      this.#dropPendingIncoming(client);
+      client.queued.length = 0;
       this.#revokeClientTickets(client);
       try { client.ws.terminate(); } catch (error) { this.#report(error); }
     }
@@ -266,6 +306,64 @@ export class RemoteServer extends EventEmitter {
       try { await this.adapter.stop?.(); } catch (stopError) { this.#report(stopError); }
     }
     this.adapterStarted = false;
+    if (this.ownAdapter) await this.adapterStartPromise;
+  }
+
+  #scheduleAdapterStart() {
+    this.adapterStartSettled = false;
+    this.adapterStartFailed = false;
+    this.adapterStartPromise = new Promise((resolve) => {
+      this.adapterStartResolve = resolve;
+      this.adapterStartHandle = setImmediate(() => {
+        this.adapterStartHandle = null;
+        if (this.adapterStopping) {
+          this.adapterStartResolve = null;
+          resolve();
+          return;
+        }
+        void this.#startAdapter().finally(() => {
+          this.adapterStartSettled = true;
+          this.adapterStartResolve = null;
+          resolve();
+        });
+      });
+    });
+  }
+
+  #cancelScheduledAdapterStart() {
+    if (this.adapterStartHandle == null) return;
+    clearImmediate(this.adapterStartHandle);
+    this.adapterStartHandle = null;
+    this.adapterStartSettled = true;
+    const resolve = this.adapterStartResolve;
+    this.adapterStartResolve = null;
+    resolve?.();
+  }
+
+  async #startAdapter() {
+    try {
+      await this.adapter.start?.();
+      if (this.adapterStopping) return;
+      this.adapterReady = true;
+      this.#broadcastSystemState();
+      void this.#refreshWaitingConversations().catch((error) => {
+        if (!this.adapterStopping) this.#report(error);
+      });
+      this.#flushPendingIncoming();
+    } catch (error) {
+      this.adapterReady = false;
+      this.adapterStartFailed = true;
+      if (!this.adapterStopping) {
+        this.#report(error);
+        this.#broadcastSystemState();
+        this.#rejectPendingIncoming();
+      }
+    }
+  }
+
+  #isAdapterReady() {
+    return this.adapterReady
+      && (this.adapter.appServerStatus == null || this.adapter.appServerStatus === "online");
   }
 
   #createHttpSurface() {
@@ -401,8 +499,12 @@ export class RemoteServer extends EventEmitter {
       closed: false,
       ticketsRevoked: false,
       ready: false,
+      waitingForAdapter: false,
       queued: [],
       incoming: [],
+      initializingIncoming: [],
+      drainingIncoming: false,
+      pendingRpcCount: 0,
       alive: true,
       chain: Promise.resolve(),
       windowStart: Date.now(),
@@ -412,6 +514,8 @@ export class RemoteServer extends EventEmitter {
     ws.on("pong", () => { client.alive = true; });
     ws.on("close", () => {
       client.closed = true;
+      this.#dropPendingIncoming(client);
+      client.queued.length = 0;
       this.#revokeClientTickets(client);
       this.clients.delete(client);
     });
@@ -426,15 +530,18 @@ export class RemoteServer extends EventEmitter {
         return;
       }
       const wire = data.toString();
+      const incoming = classifyIncoming(wire);
       if (!client.ready) {
-        if (client.incoming.length >= MAX_PENDING_INCOMING) {
+        // Preserve deterministic initialization ordering. A startup failure
+        // explicitly rejects these messages instead of silently dropping them.
+        if (client.initializingIncoming.length >= MAX_PENDING_INCOMING) {
           ws.close(4008, "Too many messages during initialization");
         } else {
-          client.incoming.push(wire);
+          client.initializingIncoming.push(incoming);
         }
         return;
       }
-      this.#enqueueMessage(client, wire);
+      this.#routeIncoming(client, incoming);
     });
 
     const capabilities = ["codex", "threads", "images", "approvals", "screen", "control"];
@@ -454,26 +561,142 @@ export class RemoteServer extends EventEmitter {
         ...this.artifactStore.snapshot(this.adapter.threadId),
       }, true);
     }
-    let conversations;
-    try {
-      conversations = await this.adapter.listThreads({ limit: 50 });
-    } catch (error) {
-      this.#report(error);
-      conversations = { data: [], nextCursor: null };
+    let conversations = { data: [], nextCursor: null };
+    if (this.#isAdapterReady()) {
+      try {
+        conversations = await this.adapter.listThreads({ limit: 50 });
+      } catch (error) {
+        this.#report(error);
+      }
+    } else {
+      client.waitingForAdapter = true;
     }
     this.#send(client, conversationEvent(conversations), true);
     for (const approval of this.adapter.pendingApprovals?.() ?? []) this.#send(client, safeWire(approval), true);
     client.ready = true;
     for (const event of client.queued.splice(0)) this.#send(client, event, true);
-    for (const wire of client.incoming.splice(0)) this.#enqueueMessage(client, wire);
+    for (const incoming of client.initializingIncoming.splice(0)) {
+      this.#routeIncoming(client, incoming);
+    }
   }
 
-  #enqueueMessage(client, wire) {
-    client.chain = client.chain
-      .then(() => this.#handleMessage(client, wire))
-      .catch((error) => {
-        this.#send(client, { type: "error", message: error?.message || "Request failed" }, true);
-      });
+  #canWaitForAdapter() {
+    return !this.adapterStopping
+      && !this.adapterStartFailed
+      && (!this.adapterStartSettled || this.adapter.appServerStatus === "restarting");
+  }
+
+  #sendAdapterUnavailable(client) {
+    this.#send(client, {
+      type: "error",
+      code: "APP_SERVER_UNAVAILABLE",
+      message: "Codex App Server is unavailable; the request was not processed.",
+    }, true);
+  }
+
+  #routeIncoming(client, incoming) {
+    if (incoming.rpcDependent && !this.#isAdapterReady() && !this.#canWaitForAdapter()) {
+      this.#sendAdapterUnavailable(client);
+      return;
+    }
+    if (incoming.rpcDependent && client.pendingRpcCount >= MAX_PENDING_INCOMING) {
+      client.ws.close(4008, "Too many messages while Codex is starting");
+      return;
+    }
+    if (incoming.rpcDependent) client.pendingRpcCount += 1;
+    client.incoming.push(incoming);
+    this.#drainPendingIncoming(client);
+  }
+
+  #flushPendingIncoming() {
+    if (!this.#isAdapterReady()) return;
+    for (const client of this.clients) {
+      if (client.closed || !client.ready) continue;
+      this.#drainPendingIncoming(client);
+    }
+  }
+
+  #drainPendingIncoming(client) {
+    if (client.drainingIncoming || client.closed || !client.ready) return;
+    client.drainingIncoming = true;
+    const draining = (async () => {
+      try {
+        while (client.incoming.length) {
+          if (client.closed) {
+            this.#dropPendingIncoming(client);
+            return;
+          }
+          let index = 0;
+          if (!this.#isAdapterReady()) {
+            if (!this.#canWaitForAdapter()) this.#rejectPendingIncoming(client);
+            index = client.incoming.findIndex((entry) => !entry.rpcDependent);
+            if (index < 0) return;
+          }
+          const [incoming] = client.incoming.splice(index, 1);
+          const outcome = await this.#executeMessage(client, incoming, {
+            requireOpen: true,
+            requireAdapterReady: incoming.rpcDependent,
+          });
+          if (outcome === "deferred" && !client.closed) {
+            client.incoming.splice(Math.min(index, client.incoming.length), 0, incoming);
+            return;
+          }
+          if (incoming.rpcDependent && client.pendingRpcCount > 0) client.pendingRpcCount -= 1;
+        }
+      } finally {
+        client.drainingIncoming = false;
+        if (client.incoming.length && !client.closed
+            && (this.#isAdapterReady() || client.incoming.some((entry) => !entry.rpcDependent))) {
+          this.#drainPendingIncoming(client);
+        }
+      }
+    })();
+    client.chain = draining.catch(() => {});
+  }
+
+  #rejectPendingIncoming(target = null) {
+    const clients = target ? [target] : this.clients;
+    for (const client of clients) {
+      if (client.closed) {
+        this.#dropPendingIncoming(client);
+        continue;
+      }
+      const retained = [];
+      for (const incoming of client.incoming) {
+        if (incoming.rpcDependent) {
+          if (client.pendingRpcCount > 0) client.pendingRpcCount -= 1;
+          this.#sendAdapterUnavailable(client);
+        } else {
+          retained.push(incoming);
+        }
+      }
+      client.incoming = retained;
+      this.#drainPendingIncoming(client);
+    }
+  }
+
+  #dropPendingIncoming(client) {
+    client.incoming.length = 0;
+    client.initializingIncoming.length = 0;
+    client.pendingRpcCount = 0;
+  }
+
+  async #executeMessage(client, incoming, {
+    requireOpen = false,
+    requireAdapterReady = false,
+  } = {}) {
+    if (requireOpen && (client.closed || client.ws.readyState !== WebSocket.OPEN)) return "dropped";
+    if (requireAdapterReady && !this.#isAdapterReady()) {
+      if (this.#canWaitForAdapter()) return "deferred";
+      this.#sendAdapterUnavailable(client);
+      return "rejected";
+    }
+    try {
+      await this.#handleMessage(client, incoming);
+    } catch (error) {
+      this.#send(client, { type: "error", message: error?.message || "Request failed" }, true);
+    }
+    return "processed";
   }
 
   #consumeRate(client) {
@@ -486,9 +709,9 @@ export class RemoteServer extends EventEmitter {
     return client.messageCount <= MAX_MESSAGES_PER_WINDOW;
   }
 
-  async #handleMessage(client, wire) {
-    let message;
-    try { message = JSON.parse(wire); } catch { throw new Error("Invalid JSON message"); }
+  async #handleMessage(client, incoming) {
+    if (incoming.parseError) throw new Error("Invalid JSON message");
+    const { message } = incoming;
     if (!message || typeof message !== "object" || Array.isArray(message)) {
       throw new Error("Message must be an object");
     }
@@ -765,7 +988,20 @@ export class RemoteServer extends EventEmitter {
 
   async #refreshConversations() {
     const result = await this.adapter.listThreads({ limit: 50 });
+    if (this.adapterStopping || !this.#isAdapterReady()) return;
     this.#broadcast(conversationEvent(result));
+  }
+
+  async #refreshWaitingConversations() {
+    if (![...this.clients].some((client) => client.waitingForAdapter && !client.closed)) return;
+    const result = await this.adapter.listThreads({ limit: 50 });
+    if (this.adapterStopping || !this.#isAdapterReady()) return;
+    const event = conversationEvent(result);
+    for (const client of this.clients) {
+      if (!client.waitingForAdapter || client.closed) continue;
+      client.waitingForAdapter = false;
+      this.#send(client, event);
+    }
   }
 
   #subscribeAdapter() {
@@ -816,6 +1052,10 @@ export class RemoteServer extends EventEmitter {
       }
     }
     this.#broadcast(clean);
+    if (this.#isAdapterReady()) this.#flushPendingIncoming();
+    else if (clean.type === "system_init" && clean.appServerStatus === "offline") {
+      this.#rejectPendingIncoming();
+    }
   }
 
   #replaceHistory(threadId, events) {
@@ -860,6 +1100,8 @@ export class RemoteServer extends EventEmitter {
     for (const client of this.clients) {
       if (!client.alive) {
         client.closed = true;
+        this.#dropPendingIncoming(client);
+        client.queued.length = 0;
         this.#revokeClientTickets(client);
         client.ws.terminate();
         this.clients.delete(client);
@@ -881,6 +1123,9 @@ export class RemoteServer extends EventEmitter {
   }
 
   async #close() {
+    this.adapterStopping = true;
+    this.adapterReady = false;
+    this.#cancelScheduledAdapterStart();
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
     this.unsubscribe?.();
@@ -889,6 +1134,8 @@ export class RemoteServer extends EventEmitter {
     this.unsubscribeArtifacts = null;
     for (const client of this.clients) {
       client.closed = true;
+      this.#dropPendingIncoming(client);
+      client.queued.length = 0;
       this.#revokeClientTickets(client);
       client.ws.terminate();
     }
@@ -899,6 +1146,7 @@ export class RemoteServer extends EventEmitter {
     }
     if (this.ownAdapter && this.adapterStarted) await this.adapter.stop?.();
     this.adapterStarted = false;
+    if (this.ownAdapter) await this.adapterStartPromise;
   }
 }
 

@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const ROOT_FILES = ["package.json", "server.js"];
-const HASH_FILES = [...ROOT_FILES, "package-lock.json"];
-const CODE_DIRECTORIES = ["src"];
+const APP_ROOT_FILES = ["package.json", "server.js"];
+const APP_DIRECTORIES = ["src"];
+const DEPENDENCY_SCHEMA = "codex-remote-dependencies-v2";
+const APP_SCHEMA = "codex-remote-app-v2";
 const LOCK_WAIT = new Int32Array(new SharedArrayBuffer(4));
 const LOCK_TIMEOUT_MS = 10 * 60 * 1_000;
 const LOCK_STALE_MS = 30 * 60 * 1_000;
@@ -35,40 +36,73 @@ function copyWritableFile(source, target) {
   fs.chmodSync(target, 0o600);
 }
 
+function updateFileHash(hash, baseDir, relative) {
+  const absolute = path.join(baseDir, relative);
+  hash.update(`${relative}\0`);
+  if (fs.existsSync(absolute)) hash.update(fs.readFileSync(absolute));
+  else hash.update("<missing>");
+  hash.update("\0");
+}
+
+function readManifest(sourceDir) {
+  return JSON.parse(fs.readFileSync(path.join(sourceDir, "package.json"), "utf8"));
+}
+
+function normalizedDependencies(manifest) {
+  return Object.fromEntries(Object.entries(manifest.dependencies || {}).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function runtimeIdentity(identity = {}) {
+  return {
+    platform: identity.platform || process.platform,
+    arch: identity.arch || process.arch,
+    abi: String(identity.abi || process.versions.modules || "unknown"),
+  };
+}
+
+export function assertSupportedNodeVersion(version = process.versions.node) {
+  const major = Number(String(version || "").split(".")[0]);
+  if (!Number.isInteger(major) || major < 18) {
+    throw new Error(`Node.js ${version || "unknown"} is too old. Codex Remote requires Node.js 18 or newer.`);
+  }
+}
+
 export function resolveAppHome(env = process.env) {
   const local = env.LOCALAPPDATA?.trim();
   return local ? path.resolve(local, "CodexRemote") : path.resolve(os.homedir(), ".codex-remote");
 }
 
-export function runtimeHash(sourceDir) {
+export function appHash(sourceDir) {
   const hash = createHash("sha256");
-  hash.update("codex-remote-runtime-v1\0");
-  for (const relative of HASH_FILES) {
-    const absolute = path.join(sourceDir, relative);
-    hash.update(`${relative}\0`);
-    if (fs.existsSync(absolute)) hash.update(fs.readFileSync(absolute));
-    else hash.update("<missing>");
-    hash.update("\0");
-  }
-  for (const directory of CODE_DIRECTORIES) {
+  hash.update(`${APP_SCHEMA}\0`);
+  for (const relative of APP_ROOT_FILES) updateFileHash(hash, sourceDir, relative);
+  for (const directory of APP_DIRECTORIES) {
     const absolute = path.join(sourceDir, directory);
     for (const nested of walkFiles(absolute)) {
-      hash.update(`${path.join(directory, nested)}\0`);
-      hash.update(fs.readFileSync(path.join(absolute, nested)));
-      hash.update("\0");
+      updateFileHash(hash, sourceDir, path.join(directory, nested));
     }
   }
   return hash.digest("hex").slice(0, 24);
 }
 
-function copyRuntimeSource(sourceDir, targetDir) {
+export const runtimeHash = appHash;
+
+export function dependencyHash(sourceDir, identity = {}) {
+  const hash = createHash("sha256");
+  const resolvedIdentity = runtimeIdentity(identity);
+  hash.update(`${DEPENDENCY_SCHEMA}\0`);
+  updateFileHash(hash, sourceDir, "package-lock.json");
+  hash.update(`${JSON.stringify(normalizedDependencies(readManifest(sourceDir)))}\0`);
+  hash.update(`${resolvedIdentity.platform}\0${resolvedIdentity.arch}\0${resolvedIdentity.abi}\0`);
+  return hash.digest("hex").slice(0, 24);
+}
+
+function copyAppSource(sourceDir, targetDir) {
   fs.mkdirSync(targetDir, { recursive: true });
-  for (const relative of ROOT_FILES) {
+  for (const relative of APP_ROOT_FILES) {
     copyWritableFile(path.join(sourceDir, relative), path.join(targetDir, relative));
   }
-  const sourceLock = path.join(sourceDir, "package-lock.json");
-  if (fs.existsSync(sourceLock)) copyWritableFile(sourceLock, path.join(targetDir, "package-lock.json"));
-  for (const directory of CODE_DIRECTORIES) {
+  for (const directory of APP_DIRECTORIES) {
     const sourceDirectory = path.join(sourceDir, directory);
     fs.mkdirSync(path.join(targetDir, directory), { recursive: true });
     for (const nestedPath of walkFiles(sourceDirectory)) {
@@ -79,30 +113,50 @@ function copyRuntimeSource(sourceDir, targetDir) {
   }
 }
 
-function dependenciesPresent(runtimeDir) {
+function copyDependencySource(sourceDir, targetDir) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  copyWritableFile(path.join(sourceDir, "package.json"), path.join(targetDir, "package.json"));
+  const sourceLock = path.join(sourceDir, "package-lock.json");
+  if (fs.existsSync(sourceLock)) copyWritableFile(sourceLock, path.join(targetDir, "package-lock.json"));
+}
+
+function dependenciesPresent(dependencyDir, dependencyNames) {
   try {
-    const manifest = JSON.parse(fs.readFileSync(path.join(runtimeDir, "package.json"), "utf8"));
-    return Object.keys(manifest.dependencies || {}).every((name) => (
-      fs.existsSync(path.join(runtimeDir, "node_modules", ...name.split("/"), "package.json"))
-    ));
+    return dependencyNames.every((name) => {
+      const manifestPath = path.join(dependencyDir, "node_modules", ...name.split("/"), "package.json");
+      const installed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      return installed.name === name;
+    });
   } catch {
     return false;
   }
 }
 
-function runtimeReady(runtimeDir, expectedHash) {
+function dependencyReady(dependencyDir, expectedKey, identity, dependencyNames) {
   try {
-    const marker = JSON.parse(fs.readFileSync(path.join(runtimeDir, ".ready"), "utf8"));
-    return marker.hash === expectedHash
-      && runtimeHash(runtimeDir) === expectedHash
-      && dependenciesPresent(runtimeDir);
+    const marker = JSON.parse(fs.readFileSync(path.join(dependencyDir, ".ready"), "utf8"));
+    return marker.schema === DEPENDENCY_SCHEMA
+      && marker.key === expectedKey
+      && dependencyHash(dependencyDir, identity) === expectedKey
+      && dependenciesPresent(dependencyDir, dependencyNames);
   } catch {
     return false;
   }
 }
 
-function lockSupportsCi(runtimeDir) {
-  const lockFile = path.join(runtimeDir, "package-lock.json");
+function appReady(appDir, expectedKey) {
+  try {
+    const marker = JSON.parse(fs.readFileSync(path.join(appDir, ".ready"), "utf8"));
+    return marker.schema === APP_SCHEMA
+      && marker.key === expectedKey
+      && appHash(appDir) === expectedKey;
+  } catch {
+    return false;
+  }
+}
+
+function lockSupportsCi(directory) {
+  const lockFile = path.join(directory, "package-lock.json");
   if (!fs.existsSync(lockFile)) return false;
   try {
     const lock = JSON.parse(fs.readFileSync(lockFile, "utf8"));
@@ -112,14 +166,25 @@ function lockSupportsCi(runtimeDir) {
   }
 }
 
-function runNpm(command, runtimeDir, env) {
-  const args = [command, "--omit=dev", "--no-audit", "--no-fund"];
+function npmAvailable(env) {
+  if (process.platform === "win32") {
+    const result = spawnSync(env.ComSpec || process.env.ComSpec || "cmd.exe", [
+      "/d", "/s", "/c", "where npm >nul 2>&1",
+    ], { env, stdio: "ignore" });
+    return !result.error && result.status === 0;
+  }
+  const result = spawnSync("npm", ["--version"], { env, stdio: "ignore" });
+  return !result.error && result.status === 0;
+}
+
+function runNpm(command, dependencyDir, env) {
+  const args = [command, "--omit=dev", "--no-audit", "--no-fund", "--prefer-offline"];
   if (process.platform === "win32") {
     return spawnSync(env.ComSpec || process.env.ComSpec || "cmd.exe", [
       "/d", "/s", "/c", `call npm ${args.join(" ")}`,
-    ], { cwd: runtimeDir, env, stdio: "inherit" });
+    ], { cwd: dependencyDir, env, stdio: "inherit" });
   }
-  return spawnSync("npm", args, { cwd: runtimeDir, env, stdio: "inherit" });
+  return spawnSync("npm", args, { cwd: dependencyDir, env, stdio: "inherit" });
 }
 
 function processExists(pid) {
@@ -145,8 +210,9 @@ function lockIsStale(lockDir) {
   }
 }
 
-function acquireRuntimeLock(runtimeRoot, hash) {
-  const lockDir = path.join(runtimeRoot, `.lock-${hash}`);
+function acquireCacheLock(parentDir, name) {
+  fs.mkdirSync(parentDir, { recursive: true });
+  const lockDir = path.join(parentDir, `.lock-${name}`);
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   const nonce = randomBytes(8).toString("hex");
   let announced = false;
@@ -185,7 +251,7 @@ function acquireRuntimeLock(runtimeRoot, hash) {
         if (error?.code !== "ENOENT" && error?.code !== "EEXIST") throw error;
       }
     }
-    if (Date.now() >= deadline) throw new Error("Timed out waiting for another launcher to prepare this runtime.");
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for another launcher to prepare this cache.");
     if (!announced) {
       console.log("[Codex Remote] Another launcher is preparing this version. Waiting...");
       announced = true;
@@ -194,46 +260,36 @@ function acquireRuntimeLock(runtimeRoot, hash) {
   }
 }
 
-function restoreSourceLock(sourceDir, runtimeDir) {
+function restoreDependencyMetadata(sourceDir, dependencyDir) {
+  copyWritableFile(path.join(sourceDir, "package.json"), path.join(dependencyDir, "package.json"));
   const sourceLock = path.join(sourceDir, "package-lock.json");
-  const runtimeLock = path.join(runtimeDir, "package-lock.json");
-  if (fs.existsSync(sourceLock)) copyWritableFile(sourceLock, runtimeLock);
-  else fs.rmSync(runtimeLock, { force: true });
+  const dependencyLock = path.join(dependencyDir, "package-lock.json");
+  if (fs.existsSync(sourceLock)) copyWritableFile(sourceLock, dependencyLock);
+  else fs.rmSync(dependencyLock, { force: true });
 }
 
-function promoteRuntime(staging, runtimeDir, hash) {
-  if (runtimeReady(runtimeDir, hash)) return;
+function promoteCache(staging, target, isReady) {
+  if (isReady(target)) return;
 
   let displaced = "";
-  if (fs.existsSync(runtimeDir)) {
-    displaced = `${runtimeDir}.invalid-${process.pid}-${randomBytes(4).toString("hex")}`;
+  if (fs.existsSync(target)) {
+    displaced = `${target}.invalid-${process.pid}-${randomBytes(4).toString("hex")}`;
     try {
-      fs.renameSync(runtimeDir, displaced);
+      fs.renameSync(target, displaced);
     } catch (error) {
-      if (runtimeReady(runtimeDir, hash)) return;
+      if (isReady(target)) return;
       throw error;
-    }
-
-    // Another launcher may have repaired the runtime after our first check.
-    if (runtimeReady(displaced, hash)) {
-      try {
-        fs.renameSync(displaced, runtimeDir);
-        displaced = "";
-      } catch (error) {
-        if (!runtimeReady(runtimeDir, hash)) throw error;
-      }
-      return;
     }
   }
 
   try {
     try {
-      fs.renameSync(staging, runtimeDir);
+      fs.renameSync(staging, target);
     } catch (error) {
-      if (!runtimeReady(runtimeDir, hash)) {
-        if (displaced && !fs.existsSync(runtimeDir)) {
+      if (!isReady(target)) {
+        if (displaced && !fs.existsSync(target)) {
           try {
-            fs.renameSync(displaced, runtimeDir);
+            fs.renameSync(displaced, target);
             displaced = "";
           } catch {
             // Preserve the original promotion error below.
@@ -249,36 +305,74 @@ function promoteRuntime(staging, runtimeDir, hash) {
   }
 }
 
-function installRuntime({ sourceDir, runtimeRoot, runtimeDir, appHome, hash, env }) {
-  if (runtimeReady(runtimeDir, hash)) return runtimeDir;
-  const releaseLock = acquireRuntimeLock(runtimeRoot, hash);
+function installDependencies({ sourceDir, runtimeRoot, dependencyDir, appHome, key, identity, dependencies, env }) {
+  const dependencyNames = Object.keys(dependencies);
+  const isReady = (directory) => dependencyReady(directory, key, identity, dependencyNames);
+  if (isReady(dependencyDir)) return dependencyDir;
+
+  const releaseLock = acquireCacheLock(runtimeRoot, `dependency-${key}`);
   try {
-    if (runtimeReady(runtimeDir, hash)) return runtimeDir;
-    const staging = path.join(runtimeRoot, `.staging-${hash}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    if (isReady(dependencyDir)) return dependencyDir;
+    const staging = path.join(runtimeRoot, `.dependency-staging-${key}-${process.pid}-${randomBytes(4).toString("hex")}`);
     try {
-      copyRuntimeSource(sourceDir, staging);
+      copyDependencySource(sourceDir, staging);
       const useCi = lockSupportsCi(staging);
+      if (!npmAvailable(env)) {
+        throw new Error("npm is required to install Codex Remote dependencies but was not found on PATH.");
+      }
       console.log("[Codex Remote] Installing project dependencies. This normally happens only once...");
       if (!useCi) console.warn("[WARN] Invalid or missing package-lock.json. Rebuilding it with npm install...");
       const result = runNpm(useCi ? "ci" : "install", staging, {
         ...env,
         npm_config_cache: path.join(appHome, "npm-cache"),
+        npm_config_update_notifier: "false",
       });
       if (result.error) throw result.error;
       if (result.status !== 0) {
         throw new Error(`Dependency installation failed: npm exited with code ${result.status ?? "unknown"}.`);
       }
-      if (!dependenciesPresent(staging)) {
+      restoreDependencyMetadata(sourceDir, staging);
+      if (!dependenciesPresent(staging, dependencyNames)) {
         throw new Error("Dependency installation failed: required packages are missing after npm completed.");
       }
-      restoreSourceLock(sourceDir, staging);
-      fs.writeFileSync(path.join(staging, ".ready"), JSON.stringify({ hash, installedAt: new Date().toISOString() }));
-      promoteRuntime(staging, runtimeDir, hash);
-      if (!runtimeReady(runtimeDir, hash)) {
-        const actualHash = runtimeHash(runtimeDir);
-        throw new Error(`Runtime installation failed its integrity check (expected ${hash}, got ${actualHash}).`);
+      fs.writeFileSync(path.join(staging, ".ready"), JSON.stringify({
+        schema: DEPENDENCY_SCHEMA,
+        key,
+        installedAt: new Date().toISOString(),
+      }));
+      promoteCache(staging, dependencyDir, isReady);
+      if (!isReady(dependencyDir)) {
+        throw new Error(`Dependency installation failed its integrity check for cache ${key}.`);
       }
-      return runtimeDir;
+      return dependencyDir;
+    } finally {
+      if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: true });
+    }
+  } finally {
+    releaseLock();
+  }
+}
+
+function installApp({ sourceDir, dependencyDir, appDir, key }) {
+  if (appReady(appDir, key)) return appDir;
+
+  const appsRoot = path.join(dependencyDir, "apps");
+  const releaseLock = acquireCacheLock(appsRoot, `app-${key}`);
+  try {
+    if (appReady(appDir, key)) return appDir;
+    const staging = path.join(appsRoot, `.app-staging-${key}-${process.pid}-${randomBytes(4).toString("hex")}`);
+    try {
+      copyAppSource(sourceDir, staging);
+      fs.writeFileSync(path.join(staging, ".ready"), JSON.stringify({
+        schema: APP_SCHEMA,
+        key,
+        installedAt: new Date().toISOString(),
+      }));
+      promoteCache(staging, appDir, (directory) => appReady(directory, key));
+      if (!appReady(appDir, key)) {
+        throw new Error(`Application snapshot failed its integrity check for cache ${key}.`);
+      }
+      return appDir;
     } finally {
       if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: true });
     }
@@ -298,23 +392,48 @@ function migrateConfig(sourceDir, configFile) {
   }
 }
 
-export function prepareRuntime({ sourceDir, env = process.env } = {}) {
+export function prepareRuntime({ sourceDir, env = process.env, identity = {} } = {}) {
+  assertSupportedNodeVersion();
   const source = path.resolve(sourceDir || ".");
   const appHome = resolveAppHome(env);
   const runtimeRoot = path.join(appHome, "runtime");
   if (isInside(source, appHome) || isInside(appHome, source)) {
     throw new Error("Source and user runtime directories must be separate.");
   }
-  for (const relative of [...ROOT_FILES, ...CODE_DIRECTORIES]) {
+  for (const relative of [...APP_ROOT_FILES, ...APP_DIRECTORIES]) {
     if (!fs.existsSync(path.join(source, relative))) throw new Error(`Missing runtime source: ${relative}`);
   }
   fs.mkdirSync(runtimeRoot, { recursive: true });
   const configFile = path.join(appHome, "config.json");
   migrateConfig(source, configFile);
-  const hash = runtimeHash(source);
-  const runtimeDir = path.join(runtimeRoot, hash);
-  installRuntime({ sourceDir: source, runtimeRoot, runtimeDir, appHome, hash, env });
-  return { sourceDir: source, appHome, configFile, runtimeDir };
+
+  const resolvedIdentity = runtimeIdentity(identity);
+  const dependencyKey = dependencyHash(source, resolvedIdentity);
+  const appKey = appHash(source);
+  const dependencyDir = path.join(runtimeRoot, dependencyKey);
+  const appDir = path.join(dependencyDir, "apps", appKey);
+  const dependencies = normalizedDependencies(readManifest(source));
+  installDependencies({
+    sourceDir: source,
+    runtimeRoot,
+    dependencyDir,
+    appHome,
+    key: dependencyKey,
+    identity: resolvedIdentity,
+    dependencies,
+    env,
+  });
+  installApp({ sourceDir: source, dependencyDir, appDir, key: appKey });
+  return {
+    sourceDir: source,
+    appHome,
+    configFile,
+    runtimeDir: appDir,
+    appDir,
+    appKey,
+    dependencyDir,
+    dependencyKey,
+  };
 }
 
 export function run({ sourceDir, env = process.env } = {}) {

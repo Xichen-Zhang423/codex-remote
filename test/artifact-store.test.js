@@ -495,7 +495,7 @@ test("binary file, turn, and vault limits persist too_large metadata without par
   await assert.rejects(restarted.openContent(fileTooLarge.id), /unavailable/);
 });
 
-test("startup cleans partials, quarantines invalid JSON, and marks corrupt objects failed", async (t) => {
+test("startup cleans metadata without rereading blobs and verifies corruption on first access", async (t) => {
   const { workspaceRealPath, root, store } = await fixture(t);
   const sourcePath = path.join(workspaceRealPath, "integrity.txt");
   await fs.writeFile(sourcePath, "integrity");
@@ -518,10 +518,26 @@ test("startup cleans partials, quarantines invalid JSON, and marks corrupt objec
   await fs.writeFile(path.join(root, "manifests", "invalid.json"), "{broken");
   await fs.writeFile(path.join(root, "pending", "invalid.json"), "[]");
 
-  const restarted = await ArtifactStore.open({ root });
+  const originalOpen = fs.open;
+  let startupBlobReads = 0;
+  fs.open = async function rejectStartupBlobRead(filePath, ...args) {
+    if (String(filePath).toLowerCase().endsWith(".blob")) {
+      startupBlobReads += 1;
+      throw new Error("startup must not read artifact blob content");
+    }
+    return originalOpen.call(this, filePath, ...args);
+  };
+  let restarted;
+  try {
+    restarted = await ArtifactStore.open({ root });
+  } finally {
+    fs.open = originalOpen;
+  }
   t.after(() => restarted.close());
+  assert.equal(startupBlobReads, 0);
+  assert.equal(restarted.get(record.id).state, "ready");
+  await assert.rejects(restarted.openContent(record.id), /integrity/);
   assert.equal(restarted.get(record.id).state, "failed");
-  await assert.rejects(restarted.openContent(record.id), /unavailable|integrity/);
   assert.deepEqual((await fs.readdir(path.join(root, "tmp"))).sort(), ["keep.txt"]);
   assert.equal((await fs.readdir(path.join(root, "quarantine"))).length, 2);
 
@@ -1155,7 +1171,7 @@ async function evictionCandidate(t) {
   const objectPath = lease.path;
   await lease.release();
   await completed("eviction-latest", "eviction-latest.txt", "new2");
-  return { root, store, candidate, objectPath };
+  return { directory: path.dirname(root), root, store, candidate, objectPath };
 }
 
 test("quota remove failure rolls staged content back without publishing evicted", async (t) => {
@@ -1238,6 +1254,108 @@ test("startup restores staged eviction when its manifest is still ready", async 
   await assert.rejects(fs.stat(trashPath), { code: "ENOENT" });
 });
 
+test("startup rejects a same-size corrupt staged eviction before restoring ready content", async (t) => {
+  const { root, store, candidate, objectPath } = await evictionCandidate(t);
+  await store.close();
+  const trashPath = path.join(
+    path.dirname(objectPath),
+    `.${path.basename(objectPath)}.0123456789abcdef.evicting`,
+  );
+  await fs.rename(objectPath, trashPath);
+  await fs.writeFile(trashPath, "BAD!");
+
+  const restarted = await ArtifactStore.open({ root });
+  t.after(() => restarted.close());
+  assert.equal(restarted.get(candidate.id).state, "failed");
+  await assert.rejects(restarted.openContent(candidate.id), /unavailable/);
+});
+
+test("startup rejects staged content replaced after validation but before restore", async (t) => {
+  const { root, store, candidate, objectPath } = await evictionCandidate(t);
+  await store.close();
+  const trashPath = path.join(
+    path.dirname(objectPath),
+    `.${path.basename(objectPath)}.0123456789abcdef.evicting`,
+  );
+  await fs.rename(objectPath, trashPath);
+
+  const originalRename = fs.rename;
+  let replaced = false;
+  fs.rename = async function replaceValidatedStage(source, destination) {
+    if (!replaced
+        && sameTestPath(source, trashPath)
+        && sameTestPath(destination, objectPath)) {
+      replaced = true;
+      await fs.writeFile(trashPath, "EVIL");
+    }
+    return originalRename.call(this, source, destination);
+  };
+  let restarted;
+  try {
+    restarted = await ArtifactStore.open({ root });
+  } finally {
+    fs.rename = originalRename;
+  }
+  t.after(() => restarted?.close());
+  assert.equal(replaced, true);
+  assert.equal(restarted.get(candidate.id).state, "failed");
+  await assert.rejects(restarted.openContent(candidate.id), /unavailable/);
+  await assert.rejects(fs.stat(objectPath), { code: "ENOENT" });
+});
+
+test("staged recovery never quarantines an outside file after its parent is swapped", async (t) => {
+  const { directory, root, store, candidate, objectPath } = await evictionCandidate(t);
+  await store.close();
+  const parentPath = path.dirname(objectPath);
+  const displacedParent = `${parentPath}.displaced`;
+  const outsideParent = path.join(directory, "outside-stage-parent");
+  const trashPath = path.join(
+    parentPath,
+    `.${path.basename(objectPath)}.0123456789abcdef.evicting`,
+  );
+  const outsideTrashPath = path.join(outsideParent, path.basename(trashPath));
+  const outsideObjectPath = path.join(outsideParent, path.basename(objectPath));
+  await fs.rename(objectPath, trashPath);
+  await fs.mkdir(outsideParent);
+  await fs.writeFile(outsideTrashPath, "EVIL");
+
+  const originalRename = fs.rename;
+  let swapped = false;
+  let swapError;
+  fs.rename = async function swapParentBeforeRestore(source, destination) {
+    if (!swapped
+        && sameTestPath(source, trashPath)
+        && sameTestPath(destination, objectPath)) {
+      try {
+        await originalRename.call(this, parentPath, displacedParent);
+        await fs.symlink(outsideParent, parentPath, "junction");
+        swapped = true;
+      } catch (error) {
+        swapError = error;
+      }
+    }
+    return originalRename.call(this, source, destination);
+  };
+  let restarted;
+  try {
+    restarted = await ArtifactStore.open({ root });
+  } finally {
+    fs.rename = originalRename;
+  }
+  t.after(() => restarted?.close());
+  if (!swapped && ["EPERM", "EBUSY", "EACCES"].includes(swapError?.code)) {
+    t.skip(`directory junction race unavailable: ${swapError.code}`);
+    return;
+  }
+  assert.equal(swapped, true);
+  assert.equal(restarted.get(candidate.id).state, "failed");
+  assert.equal(await fs.readFile(outsideObjectPath, "utf8"), "EVIL");
+  assert.equal(
+    (await fs.readdir(path.join(root, "quarantine"))).some((name) => name.endsWith(`-${path.basename(objectPath)}`)),
+    false,
+  );
+});
+
 test("startup removes staged eviction after its manifest committed evicted", async (t) => {
   const { root, store, candidate, objectPath } = await evictionCandidate(t);
   await store.close();
@@ -1313,6 +1431,61 @@ test("limited staged-eviction discovery restores a matching stage from the exact
   assert.equal(recovered.get(record.id).state, "ready");
   assert.equal(await fs.readFile(deepObjectPath, "utf8"), "deep-staged-content");
   await assert.rejects(fs.stat(trashPath), { code: "ENOENT" });
+});
+
+test("limited staged recovery rejects content replaced after validation but before restore", async (t) => {
+  const { workspaceRealPath, root, store } = await fixture(t);
+  const sourcePath = path.join(workspaceRealPath, "deep-race.txt");
+  await fs.writeFile(sourcePath, "deep-staged-content");
+  const record = await store.ingest(artifactInput(workspaceRealPath, "deep-race.txt", { sourcePath }));
+  const lease = await store.openContent(record.id);
+  const originalObjectPath = lease.path;
+  await lease.release();
+  await store.close();
+
+  const deepObjectPath = path.join(root, "objects", "deep", "a", "b", "c", "deep-race.blob");
+  const trashPath = path.join(
+    path.dirname(deepObjectPath),
+    `.${path.basename(deepObjectPath)}.0123456789abcdef.evicting`,
+  );
+  await fs.mkdir(path.dirname(deepObjectPath), { recursive: true });
+  await fs.rename(originalObjectPath, deepObjectPath);
+  const [manifestPath] = (await walk(path.join(root, "manifests"))).filter((file) => file.endsWith(".json"));
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  manifest.private.objects[record.id] = deepObjectPath;
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
+  await fs.rename(deepObjectPath, trashPath);
+
+  const originalRename = fs.rename;
+  let replaced = false;
+  fs.rename = async function replaceValidatedStage(source, destination) {
+    if (!replaced
+        && sameTestPath(source, trashPath)
+        && sameTestPath(destination, deepObjectPath)) {
+      replaced = true;
+      await fs.writeFile(trashPath, "evil-staged-content");
+    }
+    return originalRename.call(this, source, destination);
+  };
+  let limited;
+  try {
+    limited = await ArtifactStore.open({
+      root,
+      maxTraversalDirectories: 3,
+      maxTraversalEntries: 100,
+    });
+  } finally {
+    fs.rename = originalRename;
+  }
+  t.after(() => limited?.close());
+  assert.equal(replaced, true);
+  assert.equal(
+    limited.startupDiagnostics.some((item) => item.code === "startup_traversal_limit" && item.tree === "objects"),
+    true,
+  );
+  assert.equal(limited.get(record.id).state, "failed");
+  await assert.rejects(limited.openContent(record.id), /unavailable/);
+  await assert.rejects(fs.stat(deepObjectPath), { code: "ENOENT" });
 });
 
 test("limited staged-eviction discovery fails a missing ready object with no matching local stage", async (t) => {
@@ -1392,6 +1565,63 @@ test("openContent atomically records live corruption as failed while retaining t
   assert.equal(restarted.get(record.id).state, "failed");
   assert.equal(restarted.get(record.id).sha256, record.sha256);
   await assert.rejects(restarted.openContent(record.id), /unavailable/);
+});
+
+test("openContent rejects same-size replacement after hashing but before publishing a lease", async (t) => {
+  const { workspaceRealPath, store } = await fixture(t);
+  const sourcePath = path.join(workspaceRealPath, "lease-race.txt");
+  await fs.writeFile(sourcePath, "GOOD");
+  const record = await store.ingest(artifactInput(workspaceRealPath, "lease-race.txt", { sourcePath }));
+  const initialLease = await store.openContent(record.id);
+  const objectPath = initialLease.path;
+  await initialLease.release();
+
+  const originalWriteJson = store.writeJson;
+  let replaced = false;
+  store.writeJson = async (filePath, value) => {
+    await originalWriteJson(filePath, value);
+    if (!replaced && value.private?.lastAccessedAt?.[record.id]) {
+      replaced = true;
+      await fs.writeFile(objectPath, "EVIL");
+    }
+  };
+  await assert.rejects(store.openContent(record.id), /integrity/);
+  assert.equal(replaced, true);
+  assert.equal(store.get(record.id).state, "failed");
+});
+
+test("close releases an outstanding content handle and lease pin", async (t) => {
+  const { workspaceRealPath, store } = await fixture(t);
+  const sourcePath = path.join(workspaceRealPath, "close-lease.txt");
+  await fs.writeFile(sourcePath, "close-me");
+  const record = await store.ingest(artifactInput(workspaceRealPath, "close-lease.txt", { sourcePath }));
+  const lease = await store.openContent(record.id);
+  assert.equal(store.pins.get(record.id), 1);
+
+  await store.close();
+  assert.equal(store.pins.has(record.id), false);
+  await lease.release();
+  assert.equal(store.pins.has(record.id), false);
+});
+
+test("close gates new content opens while a queued open is waiting to run", async (t) => {
+  const { workspaceRealPath, store } = await fixture(t);
+  const sourcePath = path.join(workspaceRealPath, "close-race.txt");
+  await fs.writeFile(sourcePath, "close-race");
+  const record = await store.ingest(artifactInput(workspaceRealPath, "close-race.txt", { sourcePath }));
+
+  let releaseQueue;
+  store.mutationQueue = new Promise((resolve) => { releaseQueue = resolve; });
+  const queuedOpen = store.openContent(record.id);
+  const closePromise = store.close();
+  const lateOpen = store.openContent(record.id);
+  releaseQueue();
+
+  await assert.rejects(queuedOpen, /unavailable/);
+  await assert.rejects(lateOpen, /unavailable/);
+  await closePromise;
+  assert.equal(store.contentReleases.size, 0);
+  assert.equal(store.pins.size, 0);
 });
 
 test("pending recovery keeps a missing workspace retryable", async (t) => {

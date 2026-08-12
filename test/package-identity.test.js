@@ -36,9 +36,19 @@ test("project lockfiles are valid and match their package manifests", () => {
 
 test("package scripts compose strict release verification with all existing checks", () => {
   const scripts = JSON.parse(read("package.json")).scripts;
+  assert.equal(scripts["benchmark:startup"], "node scripts/benchmark-startup.mjs");
   assert.equal(scripts["release:verify"], "node scripts/release-verify.js");
+  assert.match(scripts.check, /node --check scripts\/benchmark-startup\.mjs/);
   assert.match(scripts.check, /node --check scripts\/release-verify\.js/);
   assert.equal(scripts.verify, "npm run check && npm test && npm run release:verify -- --allow-dirty");
+});
+
+test("visual QA writes generated screenshots outside the release tree by default", () => {
+  const visualQa = read("test/visual-qa.py");
+  assert.match(visualQa, /import tempfile/);
+  assert.match(visualQa, /CODEX_VISUAL_DIR/);
+  assert.match(visualQa, /tempfile\.gettempdir\(\)/);
+  assert.doesNotMatch(visualQa, /ROOT\s*\/\s*["']test-artifacts["']/);
 });
 
 test("PDF.js is an exact development-only source for committed Apache-2.0 assets", () => {
@@ -56,8 +66,9 @@ test("PDF.js is an exact development-only source for committed Apache-2.0 assets
   }
 
   const bootstrap = read("scripts/bootstrap.js");
-  assert.match(bootstrap, /const args = \[command, "--omit=dev", "--no-audit", "--no-fund"\]/);
+  assert.match(bootstrap, /const args = \[command, "--omit=dev", "--no-audit", "--no-fund", "--prefer-offline"\]/);
   assert.match(bootstrap, /runNpm\(useCi \? "ci" : "install"/);
+  assert.match(bootstrap, /npm_config_update_notifier:\s*"false"/);
 });
 
 test("brand rasterization is pinned as a build-only dependency", () => {
@@ -85,15 +96,20 @@ test("Windows launchers start and stop only this absolute Codex Remote process t
   const start = read("start.bat");
   assert.match(start, /scripts\\bootstrap\.js/i);
   assert.doesNotMatch(start, /npm_config_cache=%~dp0\.npm-cache/i);
-  assert.match(start, /process\.versions\.node/);
+  assert.match(start, /where node/i);
+  assert.doesNotMatch(start, /node\s+-p|where npm|:npm_missing|:node_old/i);
   assert.doesNotMatch(start, /npm\s+(?:ci|install)|node_modules|config\.json/i);
 
   const bootstrap = read("scripts/bootstrap.js");
+  assert.match(bootstrap, /process\.versions\.node/);
+  assert.match(bootstrap, /Node\.js 18 or newer/);
   assert.match(bootstrap, /LOCALAPPDATA[\s\S]{0,160}CodexRemote/i);
   assert.match(bootstrap, /createHash/);
-  assert.match(bootstrap, /\.staging-/);
+  assert.match(bootstrap, /\.dependency-staging-/);
+  assert.match(bootstrap, /\.app-staging-/);
   assert.match(bootstrap, /\.lock-/);
   assert.match(bootstrap, /\.ready/);
+  assert.match(bootstrap, /apps/);
   assert.match(bootstrap, /npm[\s\S]{0,500}\bci\b/i);
   assert.match(bootstrap, /CODEX_REMOTE_CONFIG/);
   assert.match(bootstrap, /CODEX_REMOTE_SOURCE_DIR/);
@@ -108,6 +124,9 @@ test("Windows launchers start and stop only this absolute Codex Remote process t
   assert.match(stop, /scripts\\bootstrap\.js/i);
   assert.match(stop, /CodexRemote\\runtime/i);
   assert.match(stop, /%~dp0server\.js/i);
+  assert.match(stop, /\$legacyRuntime=/);
+  assert.match(stop, /\$nestedRuntime=[^\r\n]*\\\\apps\\\\/);
+  assert.match(stop, /\$pattern=[^\r\n]*\$legacyRuntime[^\r\n]*\$nestedRuntime/);
   assert.match(stop, /Name=''node\.exe''/i);
   assert.match(stop, /ParentProcessId/i);
   assert.match(stop, /CreationDate/i);
@@ -132,6 +151,58 @@ test("Windows launchers start and stop only this absolute Codex Remote process t
     const bytes = fs.readFileSync(path.join(root, name));
     assert.equal([...bytes].some((byte) => byte > 0x7f), false, `${name} must stay ASCII-safe`);
   }
+});
+
+test("stop launcher matches only bootstrap and exact legacy or nested runtime servers", {
+  skip: process.platform !== "win32",
+}, () => {
+  const stop = read("停止遥控.bat");
+  const commandLine = stop.split(/\r?\n/).find((line) => line.startsWith("powershell "));
+  assert.ok(commandLine);
+  const marker = '-Command "';
+  const commandStart = commandLine.indexOf(marker);
+  assert.notEqual(commandStart, -1);
+  const command = commandLine.slice(commandStart + marker.length, -1);
+  const rootsStart = command.indexOf("; $roots=");
+  assert.notEqual(rootsStart, -1);
+  const definitions = command.slice(0, rootsStart);
+  const runtimeRoot = "C:\\Users\\Test\\AppData\\Local\\CodexRemote\\runtime";
+  const bootstrap = "C:\\Release\\scripts\\bootstrap.js";
+  const sourceServer = "C:\\Release\\server.js";
+  const candidates = [
+    [`node.exe "${bootstrap}" "C:\\Release"`, true],
+    [`"C:\\Program Files\\nodejs\\node.exe" "${sourceServer}"`, true],
+    [`node "${runtimeRoot}\\dependency-key\\server.js"`, true],
+    [`node "${runtimeRoot}\\dependency-key\\apps\\app-key\\server.js"`, true],
+    [`node "${runtimeRoot}\\dependency-key\\apps\\app-key\\server.js" --flag`, true],
+    [`node "${runtimeRoot}\\dependency-key\\other\\server.js"`, false],
+    [`node "${runtimeRoot}\\dependency-key\\apps\\app-key\\src\\server.js"`, false],
+    [`node "${runtimeRoot}\\dependency-key\\apps\\app-key\\server.js.evil"`, false],
+    ['node "C:\\Other\\server.js"', false],
+    [`python "${runtimeRoot}\\dependency-key\\apps\\app-key\\server.js"`, false],
+  ];
+  const script = [
+    definitions,
+    `$lines=@(${candidates.map(([line]) => `'${line.replaceAll("'", "''")}'`).join(",")})`,
+    "$matches=@($lines | ForEach-Object { [regex]::IsMatch($_,$pattern,[Text.RegularExpressions.RegexOptions]::IgnoreCase) })",
+    "$matches | ConvertTo-Json -Compress",
+  ].join("; ");
+  const powershell = path.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+  );
+  const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    windowsHide: true,
+    env: {
+      ...process.env,
+      CODEX_REMOTE_BOOTSTRAP: bootstrap,
+      CODEX_REMOTE_LEGACY_SERVER: sourceServer,
+      CODEX_REMOTE_RUNTIME_ROOT: runtimeRoot,
+    },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), candidates.map(([, expected]) => expected));
 });
 
 test("Android wrapper and workflow use the release identities", () => {

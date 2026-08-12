@@ -231,10 +231,12 @@ async function readHead(filePath, size) {
 async function hashHandle(handle) {
   const hash = crypto.createHash("sha256");
   const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
   while (true) {
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
     if (bytesRead === 0) break;
     hash.update(buffer.subarray(0, bytesRead));
+    position += bytesRead;
   }
   return hash.digest("hex");
 }
@@ -264,6 +266,57 @@ function evictionOriginalPath(trashPath) {
   return match ? path.join(path.dirname(trashPath), match[1]) : null;
 }
 
+async function restoreVerifiedStagedEviction(root, objectRoot, candidatePath, objectPath, record) {
+  if (!isWithin(objectRoot, path.resolve(candidatePath))
+      || !samePath(evictionOriginalPath(candidatePath), objectPath)) return false;
+  let handle;
+  let renamed = false;
+  try {
+    const realObjectRoot = await fs.realpath(objectRoot);
+    const parentPath = path.dirname(candidatePath);
+    const parentStats = await fs.lstat(parentPath);
+    if (!parentStats.isDirectory()
+        || parentStats.isSymbolicLink()
+        || !isWithin(realObjectRoot, await fs.realpath(parentPath))) {
+      throw new Error("invalid staged eviction parent");
+    }
+    const candidateStats = await fs.lstat(candidatePath, { bigint: true });
+    if (!candidateStats.isFile()
+        || candidateStats.isSymbolicLink()
+        || candidateStats.size !== BigInt(record.size)) throw new Error("invalid staged eviction");
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+    handle = await fs.open(candidatePath, flags);
+    const openedStats = await handle.stat({ bigint: true });
+    if (!sameIdentity(candidateStats, openedStats)
+        || await hashHandle(handle) !== record.sha256) throw new Error("invalid staged eviction");
+    await fs.rename(candidatePath, objectPath);
+    renamed = true;
+    const targetStats = await fs.lstat(objectPath, { bigint: true });
+    const targetRealPath = await fs.realpath(objectPath);
+    const finalOpenedStats = await handle.stat({ bigint: true });
+    if (!targetStats.isFile()
+        || targetStats.isSymbolicLink()
+        || !isWithin(realObjectRoot, targetRealPath)
+        || !samePath(targetRealPath, objectPath)
+        || targetStats.dev !== finalOpenedStats.dev
+        || targetStats.ino !== finalOpenedStats.ino
+        || targetStats.size !== finalOpenedStats.size
+        || finalOpenedStats.size !== BigInt(record.size)
+        || await hashHandle(handle) !== record.sha256) throw new Error("staged eviction changed during restore");
+    return true;
+  } catch {
+    await quarantineOpenedArtifact(
+      root,
+      objectRoot,
+      renamed ? objectPath : candidatePath,
+      handle,
+    );
+    return false;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
 async function restoreExactStagedEviction(objectRoot, objectPath, record) {
   const parentPath = path.dirname(objectPath);
   if (!isWithin(objectRoot, parentPath)) return false;
@@ -284,28 +337,13 @@ async function restoreExactStagedEviction(objectRoot, objectPath, record) {
       const candidatePath = path.join(parentPath, entry.name);
       const candidateOriginal = evictionOriginalPath(candidatePath);
       if (!candidateOriginal || !samePath(candidateOriginal, objectPath)) continue;
-      let handle;
-      try {
-        const candidateStats = await fs.lstat(candidatePath, { bigint: true });
-        if (!candidateStats.isFile()
-            || candidateStats.isSymbolicLink()
-            || candidateStats.size !== BigInt(record.size)) continue;
-        const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
-        handle = await fs.open(candidatePath, flags);
-        const openedStats = await handle.stat({ bigint: true });
-        if (!sameIdentity(candidateStats, openedStats)
-            || await hashHandle(handle) !== record.sha256) continue;
-      } catch {
-        continue;
-      } finally {
-        await handle?.close().catch(() => {});
-      }
-      try {
-        await fs.rename(candidatePath, objectPath);
-        return true;
-      } catch {
-        return false;
-      }
+      if (await restoreVerifiedStagedEviction(
+        path.dirname(objectRoot),
+        objectRoot,
+        candidatePath,
+        objectPath,
+        record,
+      )) return true;
     }
     return false;
   } catch {
@@ -324,6 +362,26 @@ async function quarantineFile(root, filePath) {
     `${crypto.randomBytes(8).toString("hex")}-${path.basename(filePath)}`,
   );
   await fs.rename(filePath, quarantinePath);
+}
+
+async function quarantineOpenedArtifact(root, objectRoot, filePath, handle) {
+  if (!handle) return false;
+  try {
+    const realObjectRoot = await fs.realpath(objectRoot);
+    const realFilePath = await fs.realpath(filePath);
+    if (!isWithin(realObjectRoot, realFilePath) || !samePath(realFilePath, filePath)) return false;
+    const pathStats = await fs.lstat(filePath, { bigint: true });
+    const openedStats = await handle.stat({ bigint: true });
+    if (!pathStats.isFile()
+        || pathStats.isSymbolicLink()
+        || pathStats.dev !== openedStats.dev
+        || pathStats.ino !== openedStats.ino
+        || pathStats.size !== openedStats.size) return false;
+    await quarantineFile(root, filePath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isPlainObject(value) {
@@ -623,6 +681,10 @@ export class ArtifactStore {
     this.threadRevisions = new Map();
     this.pending = new Map();
     this.pins = new Map();
+    this.contentReleases = new Set();
+    this.closing = false;
+    this.closed = false;
+    this.closePromise = null;
     this.maxPendingTurns = 10_000;
     this.mutationQueue = Promise.resolve();
   }
@@ -657,7 +719,7 @@ export class ArtifactStore {
       }
     }
     const objectRoot = path.join(this.root, "objects");
-    const readyObjectPaths = new Set();
+    const readyObjectPaths = new Map();
     for (const { manifest } of loadedManifests) {
       for (const record of manifest.records) {
         const objectPath = manifest.private.objects?.[record.id];
@@ -665,7 +727,7 @@ export class ArtifactStore {
             && typeof objectPath === "string"
             && path.isAbsolute(objectPath)
             && isWithin(objectRoot, path.resolve(objectPath))) {
-          readyObjectPaths.add(path.normalize(path.resolve(objectPath)).toLowerCase());
+          readyObjectPaths.set(path.normalize(path.resolve(objectPath)).toLowerCase(), record);
         }
       }
     }
@@ -675,13 +737,20 @@ export class ArtifactStore {
       const originalPath = evictionOriginalPath(trashPath);
       if (!originalPath) continue;
       const normalizedOriginal = path.normalize(path.resolve(originalPath)).toLowerCase();
-      if (readyObjectPaths.has(normalizedOriginal)) {
+      const readyRecord = readyObjectPaths.get(normalizedOriginal);
+      if (readyRecord) {
         try {
           await fs.lstat(originalPath);
           await fs.rm(trashPath, { force: true });
         } catch (error) {
           if (error.code !== "ENOENT") throw error;
-          await fs.rename(trashPath, originalPath);
+          await restoreVerifiedStagedEviction(
+            this.root,
+            objectRoot,
+            trashPath,
+            originalPath,
+            readyRecord,
+          );
         }
       } else if (!manifestFiles.limited) {
         await fs.rm(trashPath, { force: true });
@@ -701,8 +770,7 @@ export class ArtifactStore {
             try {
               const stats = await fs.stat(objectPath);
               valid = stats.isFile()
-                && Number(stats.size) === record.size
-                && await hashFile(objectPath) === record.sha256;
+                && Number(stats.size) === record.size;
             } catch (error) {
               const restored = stagedEvictions.limited
                 && error.code === "ENOENT"
@@ -711,8 +779,7 @@ export class ArtifactStore {
                 try {
                   const stats = await fs.stat(objectPath);
                   valid = stats.isFile()
-                    && Number(stats.size) === record.size
-                    && await hashFile(objectPath) === record.sha256;
+                    && Number(stats.size) === record.size;
                 } catch {
                   valid = false;
                 }
@@ -1316,21 +1383,40 @@ export class ArtifactStore {
   }
 
   async openContent(id) {
+    if (this.closing || this.closed) throw new Error("artifact content is unavailable");
     return this.enqueue(async () => {
+      if (this.closing || this.closed) throw new Error("artifact content is unavailable");
       const internal = this.records.get(id);
       if (!internal || internal.record.state !== "ready" || !internal.objectPath) {
         throw new Error("artifact content is unavailable");
       }
+      let handle;
       let stats;
       try {
-        stats = await fs.stat(internal.objectPath);
-        if (!stats.isFile()
+        const pathStats = await fs.lstat(internal.objectPath, { bigint: true });
+        const objectRoot = await fs.realpath(path.join(this.root, "objects"));
+        const objectRealPath = await fs.realpath(internal.objectPath);
+        if (!pathStats.isFile()
+            || pathStats.isSymbolicLink()
+            || !isWithin(objectRoot, objectRealPath)
+            || !samePath(objectRealPath, internal.objectPath)) {
+          throw new Error("artifact integrity check failed");
+        }
+        const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+        handle = await fs.open(internal.objectPath, flags);
+        stats = await handle.stat({ bigint: true });
+        if (!sameIdentity(pathStats, stats)
             || Number(stats.size) !== internal.record.size
-            || await hashFile(internal.objectPath) !== internal.record.sha256) {
+            || await hashHandle(handle) !== internal.record.sha256) {
           throw new Error("artifact integrity check failed");
         }
       } catch (error) {
-        await this.markRecordFailed(internal);
+        await handle?.close().catch(() => {});
+        try {
+          await this.markRecordFailed(internal);
+        } catch (markError) {
+          throw new AggregateError([error, markError], "artifact integrity check and failure commit failed");
+        }
         if (error.message === "artifact integrity check failed") throw error;
         throw new Error("artifact integrity check failed", { cause: error });
       }
@@ -1338,19 +1424,66 @@ export class ArtifactStore {
       const manifest = structuredClone(current);
       manifest.revision = this.nextRevision(manifest.threadId);
       manifest.private.lastAccessedAt[id] = this.now();
-      await this.commitManifest(internal.manifestPath, manifest);
+      try {
+        await this.commitManifest(internal.manifestPath, manifest);
+      } catch (error) {
+        await handle.close().catch(() => {});
+        throw error;
+      }
+      try {
+        const finalPathStats = await fs.lstat(internal.objectPath, { bigint: true });
+        const finalOpenedStats = await handle.stat({ bigint: true });
+        if (!finalPathStats.isFile()
+            || finalPathStats.isSymbolicLink()
+            || !sameIdentity(stats, finalPathStats)
+            || !sameIdentity(stats, finalOpenedStats)) {
+          throw new Error("artifact integrity check failed");
+        }
+      } catch (error) {
+        await handle.close().catch(() => {});
+        try {
+          await this.markRecordFailed(internal);
+        } catch (markError) {
+          throw new AggregateError([error, markError], "artifact integrity check and failure commit failed");
+        }
+        if (error.message === "artifact integrity check failed") throw error;
+        throw new Error("artifact integrity check failed", { cause: error });
+      }
       const published = this.records.get(id);
       const pin = this.pinLease(id);
+      let releasePromise;
+      const release = () => {
+        if (!releasePromise) {
+          releasePromise = (async () => {
+            this.contentReleases.delete(release);
+            await handle.close().catch(() => {});
+            await pin.release();
+          })();
+        }
+        return releasePromise;
+      };
+      this.contentReleases.add(release);
       return {
         record: pin.record,
         path: published.objectPath,
         size: Number(stats.size),
-        release: pin.release,
+        createReadStream: ({ start, end }) => handle.createReadStream({ start, end, autoClose: false }),
+        release,
       };
     });
   }
 
-  async close() {
-    await this.mutationQueue;
+  close() {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.closePromise = (async () => {
+      await this.mutationQueue;
+      while (this.contentReleases.size > 0) {
+        await Promise.all([...this.contentReleases].map((release) => release()));
+        await this.mutationQueue;
+      }
+      this.closed = true;
+    })();
+    return this.closePromise;
   }
 }

@@ -117,6 +117,15 @@ async function closePhone(ws) {
   await closed;
 }
 
+async function waitForCodexReady(remote, label = "Codex adapter startup") {
+  await withTimeout(remote.instance.adapterStartPromise, label);
+  assert.equal(
+    remote.instance.adapter.appServerStatus,
+    "online",
+    `${label} must finish with the App Server online`,
+  );
+}
+
 async function artifactRoots() {
   const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cr-artifact-e2e-"));
   const root = await fs.realpath(temporaryRoot);
@@ -151,6 +160,7 @@ async function startArtifactRuntime(roots) {
     port: 0,
     ownAdapter: true,
   });
+  await waitForCodexReady(remote, "artifact runtime App Server startup");
   return { store, tracker, tickets, codex, adapter, remote };
 }
 
@@ -206,6 +216,7 @@ test("runs the authenticated phone-to-App-Server lifecycle over real JSONL and W
       ownAdapter: true,
       onError: (error) => errors.push(error),
     }), "remote server startup");
+    await waitForCodexReady(remote);
     const child = codex.child;
     assert.ok(child?.pid, "CodexProcess should own a live child process");
 
@@ -495,6 +506,7 @@ test("discovers and downloads a command-created artifact without fileChange noti
     port: 0,
     ownAdapter: true,
   });
+  await waitForCodexReady(remote, "artifact App Server startup");
   phone = await openPhone(remote.wsUrl, remote.token);
 
   const after = phone.probe.messages.length;
@@ -755,6 +767,7 @@ test("production startup recovers a pending turn left by a dead service process"
     createArtifactTracker: (settings) => new ArtifactTracker(settings),
     createArtifactTickets: () => new ArtifactTicketStore(),
   });
+  await waitForCodexReady(runtime, "production recovery App Server startup");
   phone = await openPhone(runtime.wsUrl, runtime.token);
   await phone.probe.waitForCount(4, "production recovery initialization");
   await loadArtifactThread(phone, "thread-e2e");

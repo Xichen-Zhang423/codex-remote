@@ -49,11 +49,12 @@ test("lockfile dependency comparison ignores object key order", (t) => {
   assert.deepEqual(validateLockfile(root, "package.json", "package-lock.json"), []);
 });
 
-test("release requires both desktop panel runtime assets", (t) => {
+test("release requires desktop panel and startup benchmark runtime assets", (t) => {
   const root = fixture(t);
   const findings = validateRequiredPaths(root);
   assert.ok(findings.includes("public/panel.js: required release path is missing"));
   assert.ok(findings.includes("src/desktop-panel.js: required release path is missing"));
+  assert.ok(findings.includes("scripts/benchmark-startup.mjs: required release path is missing"));
 });
 
 test("release rejects qrcode-terminal in the manifest and lockfile", (t) => {

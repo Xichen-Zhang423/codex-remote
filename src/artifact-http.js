@@ -1,5 +1,3 @@
-import fs from "node:fs";
-
 import { previewKindForRecord } from "./artifact-mime.js";
 
 function rangeError() {
@@ -111,7 +109,13 @@ function streamGrantedArtifact({ request, response, lease, grant, release }) {
     return response.end();
   }
 
-  const stream = fs.createReadStream(lease.path, { start, end });
+  if (typeof lease.createReadStream !== "function") {
+    throw new TypeError("artifact lease must provide createReadStream");
+  }
+  const stream = lease.createReadStream({ start, end });
+  if (!stream || typeof stream.once !== "function" || typeof stream.pipe !== "function") {
+    throw new TypeError("artifact lease createReadStream must return a readable stream");
+  }
   stream.once("error", (error) => {
     release();
     if (!response.destroyed) response.destroy(error);
